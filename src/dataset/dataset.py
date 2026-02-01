@@ -1,89 +1,66 @@
 import torch
 from torch.utils.data import Dataset
+from torch.nn.utils.rnn import pad_sequence
+from torch.nn.functional import one_hot
+import torch.nn.functional as F
 
 
 def collate_traces_batch(
     batch,
-    num_tokens,
+    final_channels,
     padding_value=0,
     one_hot_labels=False,
 ):
-    labels, data = zip(*batch)
-    labels = [torch.as_tensor(item) for item in labels]
-    data = list(data)
+    # final_channels should be at least the initial number of classes
+    # if final_channels is more than the initial number of classes, the padding value must be set to final_channels - 1
+    # such that one-hot encoding works
 
-    label_tokens = labels
-    if labels[0].ndim == 2:
-        label_tokens = [torch.argmax(item, dim=-1) for item in labels]
+    labels = [x[0] for x in batch]
+    data = [x[1] for x in batch]
 
+    if final_channels < data[0].shape[-1]:
+        raise ValueError(f"final_channels must be at least the initial number of classes, but got {final_channels} < {data[0].shape[-1]}")
+
+    if final_channels > padding_value:
+        padding_value = final_channels - 1
+    elif padding_value > final_channels:
+        raise ValueError(f"padding value must be less than or equal to final channels, but got {padding_value} > {final_channels}")
+
+    padded_labels = pad_sequence(labels, batch_first=True, padding_value=padding_value)
     if one_hot_labels:
-        one_hot = []
-        for item in label_tokens:
-            item = item.long()
-            one_hot.append(torch.nn.functional.one_hot(item, num_classes=num_tokens).float())
-        padded_labels, label_lengths, label_mask = _pad_one_hot(
-            one_hot,
-            num_tokens=num_tokens,
-        )
-    else:
-        padded_labels, label_lengths, label_mask = _pad_tokens(label_tokens, pad_token_id=0)
+        padded_labels = one_hot(padded_labels, num_classes=final_channels)
 
-    if all(item is None for item in data):
-        return {
-            "labels": padded_labels,
-            "data": None,
-            "label_lengths": label_lengths,
-            "data_lengths": None,
-            "label_mask": label_mask,
-            "data_mask": None,
-            "label_tokens": _pad_tokens(label_tokens, pad_token_id=0)[0],
-            "pad_token_id": 0,
-            "num_tokens": num_tokens,
-        }
+    padded_data = pad_sequence(data, batch_first=True, padding_value=0.0)
+    pad_size = final_channels - padded_data.shape[-1]
+    if pad_size > 0:
+        padded_data = F.pad(padded_data, (0, pad_size, 0, 0), value=0.0)
 
-    if any(item is None for item in data):
-        raise ValueError("data must be provided for all batch items or for none")
-
-    data = [torch.as_tensor(item) for item in data]
-    data_lengths = torch.tensor([item.shape[0] for item in data], dtype=torch.long)
-    max_len = int(data_lengths.max().item())
-    feat_dim = data[0].shape[1]
-    padded_data = torch.zeros((len(data), max_len, feat_dim), dtype=data[0].dtype)
-    for i, item in enumerate(data):
-        padded_data[i, : item.shape[0]] = item
-    data_mask = torch.arange(max_len).unsqueeze(0) < data_lengths.unsqueeze(1)
-
-    return {
-        "labels": padded_labels,
-        "data": padded_data,
-        "label_lengths": label_lengths,
-        "data_lengths": data_lengths,
-        "label_mask": label_mask,
-        "data_mask": data_mask,
-        "label_tokens": _pad_tokens(label_tokens, pad_token_id=0)[0],
-        "pad_token_id": 0,
-        "num_tokens": num_tokens,
-    }
-
+    return padded_labels, padded_data
 
 class TracesDataset(Dataset):
     # expected format of data: (B, C, L) or (C, L)
     # expected format of labels: (L,) or (B, L)
-    def __init__(self, labels, data=None):
-        if data is not None and len(data) != len(labels):
+    # stored shapes are (L,) and (L, C)
+    def __init__(self, labels, data):
+        if len(data) != len(labels):
             raise ValueError("data and labels must be of same length")
         self._labels = [torch.as_tensor(item) for item in labels]
-        self._data = [torch.as_tensor(item) for item in data] if data is not None else None
+        self._data = [torch.as_tensor(item) for item in data]
         
-        if self._data[0].ndim == 3:
-            self.ch_dim = 1
-            self.len_dim = 2
-        elif self._data[0].ndim == 2:
-            self.ch_dim = 0
-            self.len_dim = 1
-        else:
-            raise ValueError(f"expected labels to have 2 or 3 dims but got {self._labels[0].ndim}, \
+        if self._labels[0].ndim > 2:
+            raise ValueError(f"expected labels to have 1 or 2 dims but got {self._labels[0].ndim}, \
                                shape: {self._labels[0].shape}")
+        if self._data[0].ndim > 3:
+            raise ValueError(f"expected data to have 2 or 3 dims but got {self._data[0].ndim}, \
+                               shape: {self._data[0].shape}")
+
+        if self._data[0].ndim == 3:
+            self._data = [x.squeeze(0).T for x in self._data]
+        if self._labels[0].ndim == 2:
+            self._labels = [x.squeeze(0) for x in self._labels]
+        
+        self.ch_dim = 1
+        self.len_dim = 0
 
         self.n_classes = self._data[0].shape[self.ch_dim]
         self.max_sequence_length = max(x.shape[self.len_dim] for x in self._data)
@@ -92,11 +69,7 @@ class TracesDataset(Dataset):
         return len(self._labels)
 
     def __getitem__(self, idx):
-        return self._labels[idx], self._data[idx] if self._data is not None else None
-
-
-
-
+        return self._labels[idx], self._data[idx]
 
 def _pad_one_hot(seqs, num_tokens):
     lengths = torch.tensor([item.shape[0] for item in seqs], dtype=torch.long)
