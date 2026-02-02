@@ -3,11 +3,7 @@ import json
 import logging
 from pathlib import Path
 from typing import Any, Dict
-
-try:
-    from omegaconf import OmegaConf
-except ImportError:  # pragma: no cover - optional dependency
-    OmegaConf = None
+from omegaconf import OmegaConf
 
 from src.train import train
 from src.inference import run_inference
@@ -30,7 +26,7 @@ def _load_config(path: Path) -> Dict[str, Any]:
 
 def _parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", required=True, help="Path to a JSON/YAML config file")
+    parser.add_argument("--config", required=True, help="Path to a YAML config file")
     parser.add_argument("--mode", choices=["train", "inference"], default=None)
     return parser.parse_args()
 

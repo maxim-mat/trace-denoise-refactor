@@ -15,7 +15,7 @@ class DDPM(BaseDiffusion):
             for i in reversed(range(1, self.noise_steps)):
                 t_tensor = (torch.ones(sample_size) * i).long().to(self.device)
                 t_prev = (torch.ones(sample_size) * (i - 1)).long().to(self.device)
-                predicted = model(x, t_tensor, y)
+                predicted = model(x, t_tensor, y)  # x_0 hat if denoiser output is "original", epsilon_hat if "noise"
                 alpha = self.alpha[t_tensor][:, None, None]
                 alpha_hat = self.alpha_hat[t_tensor][:, None, None]
                 alpha_hat_prev = self.alpha_hat[t_prev][:, None, None]
@@ -25,42 +25,15 @@ class DDPM(BaseDiffusion):
                 else:
                     noise = torch.zeros_like(x)
                 if denoiser_output == 'noise':
-                    x = 1 / torch.sqrt(alpha) * (x - ((1 - alpha) / (torch.sqrt(1 - alpha_hat))) * predicted)
-                    + ((1 - alpha_hat_prev) / (1 - alpha_hat)) * torch.sqrt(beta) * noise
+                    # DDPM reverse process: x_{t-1} = 1/sqrt(α_t) * (x_t - β_t/sqrt(1-ᾱ_t) * ε_θ) + σ_t * z
+                    # where σ_t² = β̃_t = (1-ᾱ_{t-1})/(1-ᾱ_t) * β_t
+                    x = 1 / torch.sqrt(alpha) * (x - ((1 - alpha) / (torch.sqrt(1 - alpha_hat))) * predicted) \
+                        + torch.sqrt(((1 - alpha_hat_prev) / (1 - alpha_hat)) * beta) * noise
                 elif denoiser_output == 'original':
-                    x = (torch.sqrt(alpha_hat_prev) / (1 - alpha_hat)) * predicted
-                    + ((torch.sqrt(alpha) * (1 - alpha_hat_prev)) / (1 - alpha_hat)) * x
-                    + ((1 - alpha_hat_prev) / (1 - alpha_hat)) * torch.sqrt(beta) * noise
+                    # Posterior mean: μ̃_t = (√ᾱ_{t-1}·β_t)/(1-ᾱ_t) * x_0 + (√α_t·(1-ᾱ_{t-1}))/(1-ᾱ_t) * x_t
+                    # Posterior variance: β̃_t = (1-ᾱ_{t-1})/(1-ᾱ_t) * β_t
+                    x = (torch.sqrt(alpha_hat_prev) * beta / (1 - alpha_hat)) * predicted \
+                        + ((torch.sqrt(alpha) * (1 - alpha_hat_prev)) / (1 - alpha_hat)) * x \
+                        + torch.sqrt(((1 - alpha_hat_prev) / (1 - alpha_hat)) * beta) * noise
         model.train()
         return x
-
-    # this should probably die, not sure how to seemlessly integrate denosiers with complex losses yet
-    def sample_with_matrix(self, model, n, num_categories, sequence_length, transition_dim, transition_matrix, 
-                           x_ref=None, y=None, denoiser_output='noise'):
-        model.eval()
-        with torch.no_grad():
-            x = torch.randn((n, num_categories, sequence_length)).to(self.device)
-            m = torch.randn((num_categories, transition_dim, transition_dim)).to(self.device)
-            for i in reversed(range(1, self.noise_steps)):
-                t_tensor = (torch.ones(n) * i).long().to(self.device)
-                t_prev = (torch.ones(n) * (i - 1)).long().to(self.device)
-                predicted, matrix_hat, loss, seq_loss, mat_loss = model(x, t_tensor, x_ref, transition_matrix, y)
-                alpha = self.alpha[t_tensor][:, None, None]
-                alpha_hat = self.alpha_hat[t_tensor][:, None, None]
-                alpha_hat_prev = self.alpha_hat[t_prev][:, None, None]
-                beta = self.beta[t_tensor][:, None, None]
-                if i > 1:
-                    noise = torch.randn_like(x)
-                else:
-                    noise = torch.zeros_like(x)
-                if denoiser_output == 'noise':
-                    x = 1 / torch.sqrt(alpha) * (x - ((1 - alpha) / (torch.sqrt(1 - alpha_hat))) * predicted)
-                    + ((1 - alpha_hat_prev) / (1 - alpha_hat)) * torch.sqrt(beta) * noise
-                elif denoiser_output == 'original':
-                    x = (torch.sqrt(alpha_hat_prev) / (1 - alpha_hat)) * predicted
-                    + ((torch.sqrt(alpha) * (1 - alpha_hat_prev)) / (1 - alpha_hat)) * x
-                    + ((1 - alpha_hat_prev) / (1 - alpha_hat)) * torch.sqrt(beta) * noise
-                    m = matrix_hat
-        model.train()
-        loss = loss.item() if loss is not None else None
-        return x, m, loss, seq_loss, mat_loss

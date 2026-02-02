@@ -37,6 +37,7 @@ def collate_traces_batch(
 
     return padded_labels, padded_data
 
+
 class TracesDataset(Dataset):
     # expected format of data: (B, C, L) or (C, L)
     # expected format of labels: (L,) or (B, L)
@@ -70,22 +71,3 @@ class TracesDataset(Dataset):
 
     def __getitem__(self, idx):
         return self._labels[idx], self._data[idx]
-
-def _pad_one_hot(seqs, num_tokens):
-    lengths = torch.tensor([item.shape[0] for item in seqs], dtype=torch.long)
-    max_len = int(lengths.max().item())
-    padded = torch.zeros((len(seqs), max_len, num_tokens), dtype=seqs[0].dtype)
-    for i, item in enumerate(seqs):
-        padded[i, : item.shape[0]] = item
-    mask = torch.arange(max_len).unsqueeze(0) < lengths.unsqueeze(1)
-    return padded, lengths, mask
-
-
-def _pad_tokens(seqs, pad_token_id=0):
-    lengths = torch.tensor([item.shape[0] for item in seqs], dtype=torch.long)
-    max_len = int(lengths.max().item())
-    padded = torch.full((len(seqs), max_len), pad_token_id, dtype=seqs[0].dtype)
-    for i, item in enumerate(seqs):
-        padded[i, : item.shape[0]] = item
-    mask = torch.arange(max_len).unsqueeze(0) < lengths.unsqueeze(1)
-    return padded, lengths, mask
