@@ -10,15 +10,18 @@ def collate_traces_batch(
     final_channels,
     padding_value=0,
     one_hot_labels=False,
+    target_length=None,
 ):
     # final_channels should be at least the initial number of classes
     # if final_channels is more than the initial number of classes, the padding value must be set to final_channels - 1
     # such that one-hot encoding works
+    # target_length: if specified, pad all sequences to this length (must be >= max sequence length in batch)
 
     labels = [x[0] for x in batch]
     data = [x[1] for x in batch]
+    num_classes = data[0].shape[-1]
 
-    if final_channels < data[0].shape[-1]:
+    if final_channels < num_classes:
         raise ValueError(f"final_channels must be at least the initial number of classes, but got {final_channels} < {data[0].shape[-1]}")
 
     if final_channels > padding_value:
@@ -31,6 +34,80 @@ def collate_traces_batch(
         padded_labels = one_hot(padded_labels, num_classes=final_channels)
 
     padded_data = pad_sequence(data, batch_first=True, padding_value=0.0)
+    
+    # Extend to target_length if specified
+    if target_length is not None and padded_data.shape[1] < target_length:
+        length_pad = target_length - padded_data.shape[1]
+        padded_data = F.pad(padded_data, (0, 0, 0, length_pad), value=0.0)
+        padded_labels = F.pad(padded_labels, (0, length_pad), value=padding_value)
+    
+    # Extend channel dimension to final_channels if needed
+    pad_size = final_channels - padded_data.shape[-1]
+    if pad_size > 0:
+        padded_data = F.pad(padded_data, (0, pad_size, 0, 0), value=0.0)
+
+    return padded_labels, padded_data
+
+
+def collate_traces_batch_probabilistic(
+    batch,
+    final_channels,
+    padding_value=0,
+    one_hot_labels=False,
+    target_length=None,
+):
+    # For probabilistic data tensors of shape (L_i, C) where each position is a probability distribution over C classes.
+    # This function adds a padding indicator channel:
+    # - Padded positions: values at indexes < C are 0, value at index C (padding indicator) is 1
+    # - Unpadded positions: values at indexes < C are untouched, value at index C (padding indicator) is 0
+    # final_channels should be at least the initial number of classes + 1 (for the padding indicator)
+    # target_length: if specified, pad all sequences to this length (must be >= max sequence length in batch)
+
+    labels = [x[0] for x in batch]
+    data = [x[1] for x in batch]
+
+    num_classes = data[0].shape[-1]
+
+    if final_channels < num_classes + 1:
+        raise ValueError(f"final_channels must be at least num_classes + 1 for padding indicator, but got {final_channels} < {num_classes + 1}")
+
+    if final_channels > padding_value:
+        padding_value = final_channels - 1
+    elif padding_value > final_channels:
+        raise ValueError(f"padding value must be less than or equal to final channels, but got {padding_value} > {final_channels}")
+
+    padded_labels = pad_sequence(labels, batch_first=True, padding_value=padding_value)
+    if one_hot_labels:
+        padded_labels = one_hot(padded_labels, num_classes=final_channels)
+
+    # Store original lengths before padding
+    lengths = [x.shape[0] for x in data]
+
+    # Add padding indicator channel (initialized to 0) to each data tensor
+    data_with_indicator = [
+        torch.cat([x, torch.zeros(x.shape[0], 1, dtype=x.dtype, device=x.device)], dim=-1) 
+        for x in data
+    ]
+
+    # Pad sequences along length dimension (padding value 0.0)
+    padded_data = pad_sequence(data_with_indicator, batch_first=True, padding_value=0.0)
+
+    # Determine final length (use target_length if specified, otherwise max_len from pad_sequence)
+    max_len = padded_data.shape[1]
+    final_len = max(max_len, target_length) if target_length is not None else max_len
+
+    # Extend to target_length if specified
+    if target_length is not None and max_len < target_length:
+        length_pad = target_length - max_len
+        padded_data = F.pad(padded_data, (0, 0, 0, length_pad), value=0.0)
+        padded_labels = F.pad(padded_labels, (0, length_pad), value=padding_value)
+
+    # Set padding indicator to 1 for all padded positions (both from pad_sequence and target_length extension)
+    for i, length in enumerate(lengths):
+        if length < final_len:
+            padded_data[i, length:, num_classes] = 1.0
+
+    # Extend channel dimension to final_channels if needed
     pad_size = final_channels - padded_data.shape[-1]
     if pad_size > 0:
         padded_data = F.pad(padded_data, (0, pad_size, 0, 0), value=0.0)

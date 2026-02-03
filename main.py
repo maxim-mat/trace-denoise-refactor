@@ -16,12 +16,8 @@ def _load_config(path: Path) -> Dict[str, Any]:
     if not path.exists():
         raise FileNotFoundError(f"config file not found: {path}")
 
-    if OmegaConf is not None and path.suffix.lower() in {".yaml", ".yml"}:
-        cfg = OmegaConf.load(path)
-        return OmegaConf.to_container(cfg, resolve=True)
-
-    with open(path, "r") as f:
-        return json.load(f)
+    cfg = OmegaConf.load(path)
+    return OmegaConf.to_container(cfg, resolve=True)
 
 
 def _parse_args():
