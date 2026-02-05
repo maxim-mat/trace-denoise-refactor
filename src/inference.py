@@ -149,8 +149,14 @@ def run_inference(cfg: Config):
     Main inference entry point.
     
     Loads a trained model and generates samples or runs evaluation.
+    
+    Args:
+        cfg: Configuration object
     """
     L.seed_everything(cfg.seed, workers=True)
+    
+    # Check if verbose trajectory is enabled in config
+    verbose_trajectory = cfg.metrics.verbose_trajectory
     
     if cfg.checkpoint_path is None:
         raise ValueError("checkpoint_path is required for inference")
@@ -187,6 +193,14 @@ def run_inference(cfg: Config):
         cfg.data.num_classes,
     )
     
+    # Enable verbose test mode if requested
+    if verbose_trajectory:
+        logger.info("Enabling verbose trajectory analysis...")
+        model.enable_verbose_test(
+            metrics=cfg.metrics.test,
+            save_every=cfg.metrics.trajectory_save_every,
+        )
+    
     # Run evaluation on test set
     trainer = L.Trainer(
         accelerator=cfg.trainer.accelerator,
@@ -198,6 +212,31 @@ def run_inference(cfg: Config):
     results = trainer.test(model, datamodule=datamodule)
     
     logger.info("Test results: %s", results)
+    
+    # If verbose mode was enabled, save trajectory analysis
+    if verbose_trajectory and model.trajectory_results:
+        output_dir = Path(cfg.logging.save_dir) / "inference_outputs"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Save raw trajectory results
+        trajectory_path = output_dir / "trajectory_results.pkl"
+        with open(trajectory_path, "wb") as f:
+            pkl.dump(model.trajectory_results, f)
+        logger.info("Trajectory results saved to %s", trajectory_path)
+        
+        # Also save as DataFrame if pandas available
+        try:
+            df = model.get_trajectory_dataframe()
+            csv_path = output_dir / "trajectory_metrics.csv"
+            df.to_csv(csv_path, index=False)
+            logger.info("Trajectory metrics CSV saved to %s", csv_path)
+            
+            # Log summary stats
+            logger.info("\nTrajectory Metrics Summary (by timestep):")
+            summary = df.groupby("timestep").mean(numeric_only=True)
+            logger.info("\n%s", summary.to_string())
+        except ImportError:
+            logger.warning("pandas not available, skipping CSV export")
     
     # Generate some samples for inspection
     logger.info("Generating sample outputs...")

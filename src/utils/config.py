@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Optional, Literal
+from typing import Optional, Literal, List
 from omegaconf import MISSING
 
 
@@ -88,6 +88,43 @@ class LoggingConfig:
 
 
 @dataclass
+class MetricsConfig:
+    """
+    Metrics configuration.
+    
+    IMPORTANT: Metrics are computed on FULL reverse diffusion samples, not
+    single-step denoising predictions. This means validation/test runs the
+    complete sampling process (Algorithm 2) which is computationally expensive.
+    
+    Available metrics:
+    - accuracy: Micro-averaged accuracy
+    - accuracy_macro: Macro-averaged accuracy
+    - precision: Macro-averaged precision
+    - recall: Macro-averaged recall
+    - f1: Macro-averaged F1 score
+    - auroc: Macro-averaged AUROC (may fail if not all classes present)
+    - safe_auroc: AUROC that returns -1 instead of failing
+    - auroc_weighted: Weighted AUROC
+    - wasserstein: Wasserstein-1 distance between sequences
+    - confusion_matrix: Normalized confusion matrix
+    """
+    # Metrics to compute during validation (requires full reverse diffusion)
+    val: List[str] = field(default_factory=lambda: ["accuracy", "precision", "recall", "f1", "safe_auroc"])
+    # Metrics to compute during testing
+    test: List[str] = field(default_factory=lambda: ["accuracy", "precision", "recall", "f1", "safe_auroc", "wasserstein"])
+    # Run full evaluation every N epochs (0 = never during training, only at test)
+    eval_every_n_epochs: int = 10
+    # Use DDIM for faster evaluation sampling (recommended)
+    eval_use_ddim: bool = True
+    # Number of DDIM steps for evaluation (fewer = faster but potentially lower quality)
+    eval_ddim_steps: int = 50
+    # Verbose trajectory evaluation during inference (analyze reverse diffusion at each step)
+    verbose_trajectory: bool = False
+    # Evaluate trajectory metrics every N steps (1 = all steps, higher = faster)
+    trajectory_save_every: int = 5
+
+
+@dataclass
 class Config:
     """Root configuration."""
     data: DataConfig = field(default_factory=DataConfig)
@@ -97,6 +134,7 @@ class Config:
     optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
     callbacks: CallbacksConfig = field(default_factory=CallbacksConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
+    metrics: MetricsConfig = field(default_factory=MetricsConfig)
     
     mode: Literal["train", "inference"] = "train"
     seed: int = 42

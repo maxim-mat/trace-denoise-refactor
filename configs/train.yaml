@@ -74,5 +74,31 @@ logging:
   wandb_entity: null
   wandb_offline: false
 
+# Metrics configuration
+# IMPORTANT: Metrics are computed on FULL reverse diffusion samples (Algorithm 2),
+# not single-step denoising. This is expensive but necessary for meaningful evaluation.
+# Available metrics: accuracy, accuracy_macro, precision, recall, f1, 
+#                   auroc, safe_auroc, auroc_weighted, wasserstein, confusion_matrix
+metrics:
+  val:
+    - accuracy
+    - precision
+    - recall
+    - f1
+    - safe_auroc  # safe_auroc handles missing classes gracefully
+  test:
+    - accuracy
+    - precision
+    - recall
+    - f1
+    - safe_auroc
+    - wasserstein
+  # Run full evaluation every N epochs (0 = never during training, only at test time)
+  # Loss is computed every epoch, but metrics require full reverse diffusion
+  eval_every_n_epochs: 10
+  # Use DDIM for faster evaluation (50 steps vs 1000 for DDPM)
+  eval_use_ddim: true
+  eval_ddim_steps: 50
+
 # Resume from checkpoint (null to start fresh)
 resume_from: null

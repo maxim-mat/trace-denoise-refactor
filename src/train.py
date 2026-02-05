@@ -95,6 +95,14 @@ def _create_model(cfg: Config, denoiser, diffusion) -> DiffusionLightningModule:
         loss_type=cfg.diffusion.loss_type,
         denoiser_output=cfg.diffusion.denoiser_output,
         conditional_dropout=cfg.diffusion.conditional_dropout,
+        # Metrics configuration (computed on full reverse diffusion samples)
+        num_classes=cfg.data.num_classes,
+        val_metrics=cfg.metrics.val,
+        test_metrics=cfg.metrics.test,
+        # Evaluation settings
+        eval_every_n_epochs=cfg.metrics.eval_every_n_epochs,
+        eval_use_ddim=cfg.metrics.eval_use_ddim,
+        eval_ddim_steps=cfg.metrics.eval_ddim_steps,
     )
 
 

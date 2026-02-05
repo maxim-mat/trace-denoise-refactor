@@ -34,5 +34,20 @@ diffusion:
 trainer:
   accelerator: auto
 
+# Metrics configuration for evaluation
+metrics:
+  test:
+    - accuracy
+    - precision
+    - recall
+    - f1
+    - safe_auroc
+    - wasserstein
+  # Verbose trajectory analysis - evaluate at each point along reverse diffusion
+  verbose_trajectory: false  # Set to true to analyze reverse diffusion process
+  trajectory_save_every: 5   # Evaluate every N steps (1 = all steps)
+  eval_use_ddim: true
+  eval_ddim_steps: 50
+
 logging:
   save_dir: outputs

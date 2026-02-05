@@ -1,47 +1,97 @@
 import torch
+from typing import List, Tuple, override
 from .base_diffusion import BaseDiffusion
-from typing import override
 
 
 class DDIM(BaseDiffusion):
-    def __init__(self, noise_steps=1000, inference_steps=50, eta=0.0, 
-                 beta_start=1e-4, beta_end=0.02, device="cuda"):
+    """
+    Denoising Diffusion Implicit Models (DDIM).
+    
+    Uses subsampled timesteps for faster inference.
+    eta=0 gives deterministic sampling, eta=1 gives DDPM-like stochasticity.
+    """
+    
+    def __init__(
+        self,
+        noise_steps=1000,
+        inference_steps=50,
+        eta=0.0,
+        beta_start=1e-4,
+        beta_end=0.02,
+        device="cuda",
+    ):
         super().__init__(noise_steps, beta_start, beta_end, device)
         self.inference_steps = inference_steps
         self.eta = eta
+        
+        # Create subsampled timestep sequence
         step_ratio = self.noise_steps // inference_steps
-        self.timesteps = list(range(1, self.noise_steps, step_ratio))
+        self.timesteps = list(range(0, self.noise_steps, step_ratio))
         if self.timesteps[-1] != self.noise_steps - 1:
             self.timesteps.append(self.noise_steps - 1)
+        self.timesteps = sorted(self.timesteps, reverse=True)  # Descending order
 
     @override
-    def sample(self, model, sample_size, shape, y=None, denoiser_output='noise'):
-        model.eval()
-        with torch.no_grad():
-            x = torch.randn((sample_size, *shape)).to(self.device)
-            for i, i_prev in zip(reversed(self.timesteps), list(reversed(self.timesteps))[1:]):
-                t_tensor = (torch.ones(sample_size) * i).long().to(self.device)
-                t_prev = (torch.ones(sample_size) * i_prev).long().to(self.device)
-                predicted = model(x, t_tensor, y)  # x_0 hat if denoiser output is "original", epsilon_hat if "noise"
-                alpha_hat = self.alpha_hat[t_tensor][:, None, None]
-                alpha_hat_prev = self.alpha_hat[t_prev][:, None, None]
-                if i > 1:
-                    noise = torch.randn_like(x)
-                else:
-                    noise = torch.zeros_like(x)
-                sigma_sq = (self.eta ** 2) * ((1 - alpha_hat_prev) / (1 - alpha_hat)) * (1 - (alpha_hat / alpha_hat_prev))
-                if denoiser_output == 'noise':
-                    # DDIM reverse process: x_{t-1} = √ᾱ_{t-1} · x̂_0 + √(1 - ᾱ_{t-1} - σ_t²) · ε_θ + σ_t · z
-                    # where x̂_0 = (x_t - √(1-ᾱ_t) · ε_θ) / √ᾱ_t
-                    # and σ_t² = η² · (1-ᾱ_{t-1})/(1-ᾱ_t) · (1 - ᾱ_t/ᾱ_{t-1})
-                    x = torch.sqrt(alpha_hat_prev) * ((x - torch.sqrt(1 - alpha_hat) * predicted) / torch.sqrt(alpha_hat)) \
-                        + torch.sqrt(1 - alpha_hat_prev - sigma_sq) * predicted + torch.sqrt(sigma_sq) * noise
-                elif denoiser_output == 'original':
-                    # DDIM reverse process: x_{t-1} = √ᾱ_{t-1} · x̂_0 + √(1 - ᾱ_{t-1} - σ_t²) · ε + σ_t · z
-                    # where x̂_0 = predicted, ε = (x_t - √ᾱ_t · x̂_0) / √(1-ᾱ_t)
-                    # and σ_t² = η² · (1-ᾱ_{t-1})/(1-ᾱ_t) · (1 - ᾱ_t/ᾱ_{t-1})
-                    x = torch.sqrt(alpha_hat_prev) * predicted \
-                        + torch.sqrt(1 - alpha_hat_prev - sigma_sq) * ((x - torch.sqrt(alpha_hat) * predicted) / torch.sqrt(1 - alpha_hat)) \
-                        + torch.sqrt(sigma_sq) * noise
-        model.train()
-        return x
+    def get_timestep_pairs(self) -> List[Tuple[int, int]]:
+        """Return subsampled timestep pairs."""
+        # Pair each timestep with the next one (going backwards)
+        pairs = []
+        for i in range(len(self.timesteps) - 1):
+            pairs.append((self.timesteps[i], self.timesteps[i + 1]))
+        # Final step to 0
+        if self.timesteps[-1] != 0:
+            pairs.append((self.timesteps[-1], 0))
+        return pairs
+
+    @override
+    def denoising_step(
+        self,
+        x_t: torch.Tensor,
+        t: int,
+        t_prev: int,
+        model_output: torch.Tensor,
+        denoiser_output: str,
+        batch_size: int,
+    ) -> torch.Tensor:
+        """
+        DDIM reverse step: x_{t_prev} from x_t.
+        
+        x_{t-1} = √ᾱ_{t-1} * x̂_0 + √(1 - ᾱ_{t-1} - σ²) * ε + σ * z
+        
+        where σ² = η² * (1-ᾱ_{t-1})/(1-ᾱ_t) * (1 - ᾱ_t/ᾱ_{t-1})
+        """
+        t_tensor = torch.full((batch_size,), t, device=self.device, dtype=torch.long)
+        t_prev_tensor = torch.full((batch_size,), max(t_prev, 0), device=self.device, dtype=torch.long)
+        
+        alpha_hat = self.alpha_hat[t_tensor][:, None, None]
+        alpha_hat_prev = self.alpha_hat[t_prev_tensor][:, None, None] if t_prev > 0 else torch.ones_like(alpha_hat)
+        
+        # Add noise except at final step
+        if t > 1:
+            noise = torch.randn_like(x_t)
+        else:
+            noise = torch.zeros_like(x_t)
+        
+        # DDIM variance: σ² = η² * (1-ᾱ_{t-1})/(1-ᾱ_t) * (1 - ᾱ_t/ᾱ_{t-1})
+        sigma_sq = (self.eta ** 2) * ((1 - alpha_hat_prev) / (1 - alpha_hat)) * (1 - (alpha_hat / alpha_hat_prev))
+        sigma_sq = torch.clamp(sigma_sq, min=0)  # Numerical stability
+        
+        if denoiser_output == 'noise':
+            # Predict x_0 from noise prediction: x̂_0 = (x_t - √(1-ᾱ_t) * ε_θ) / √ᾱ_t
+            pred_x0 = (x_t - torch.sqrt(1 - alpha_hat) * model_output) / torch.sqrt(alpha_hat)
+            # Direction pointing to x_t
+            pred_eps = model_output
+        elif denoiser_output == 'original':
+            # Model directly predicts x_0
+            pred_x0 = model_output
+            # Compute implied noise: ε = (x_t - √ᾱ_t * x̂_0) / √(1-ᾱ_t)
+            pred_eps = (x_t - torch.sqrt(alpha_hat) * pred_x0) / torch.sqrt(1 - alpha_hat)
+        else:
+            raise ValueError(f"Unknown denoiser_output: {denoiser_output}")
+        
+        # DDIM update: x_{t-1} = √ᾱ_{t-1} * x̂_0 + √(1 - ᾱ_{t-1} - σ²) * ε + σ * z
+        x_prev = torch.sqrt(alpha_hat_prev) * pred_x0 \
+            + torch.sqrt(1 - alpha_hat_prev - sigma_sq) * pred_eps \
+            + torch.sqrt(sigma_sq) * noise
+        
+        return x_prev

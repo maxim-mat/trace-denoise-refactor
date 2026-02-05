@@ -1,39 +1,70 @@
 import torch
+from typing import List, Tuple, override
 from .base_diffusion import BaseDiffusion
-from typing import override
 
 
 class DDPM(BaseDiffusion):
+    """
+    Denoising Diffusion Probabilistic Models (DDPM).
+    
+    Uses all timesteps for reverse diffusion (slower but higher quality).
+    """
+    
     def __init__(self, noise_steps=1000, beta_start=1e-4, beta_end=0.02, device="cuda"):
         super().__init__(noise_steps, beta_start, beta_end, device)
 
     @override
-    def sample(self, model, sample_size, shape, y=None, denoiser_output='noise'):
-        model.eval()
-        with torch.no_grad():
-            x = torch.randn((sample_size, *shape)).to(self.device)
-            for i in reversed(range(1, self.noise_steps)):
-                t_tensor = (torch.ones(sample_size) * i).long().to(self.device)
-                t_prev = (torch.ones(sample_size) * (i - 1)).long().to(self.device)
-                predicted = model(x, t_tensor, y)  # x_0 hat if denoiser output is "original", epsilon_hat if "noise"
-                alpha = self.alpha[t_tensor][:, None, None]
-                alpha_hat = self.alpha_hat[t_tensor][:, None, None]
-                alpha_hat_prev = self.alpha_hat[t_prev][:, None, None]
-                beta = self.beta[t_tensor][:, None, None]
-                if i > 1:
-                    noise = torch.randn_like(x)
-                else:
-                    noise = torch.zeros_like(x)
-                if denoiser_output == 'noise':
-                    # DDPM reverse process: x_{t-1} = 1/sqrt(α_t) * (x_t - β_t/sqrt(1-ᾱ_t) * ε_θ) + σ_t * z
-                    # where σ_t² = β̃_t = (1-ᾱ_{t-1})/(1-ᾱ_t) * β_t
-                    x = 1 / torch.sqrt(alpha) * (x - ((1 - alpha) / (torch.sqrt(1 - alpha_hat))) * predicted) \
-                        + torch.sqrt(((1 - alpha_hat_prev) / (1 - alpha_hat)) * beta) * noise
-                elif denoiser_output == 'original':
-                    # Posterior mean: μ̃_t = (√ᾱ_{t-1}·β_t)/(1-ᾱ_t) * x_0 + (√α_t·(1-ᾱ_{t-1}))/(1-ᾱ_t) * x_t
-                    # Posterior variance: β̃_t = (1-ᾱ_{t-1})/(1-ᾱ_t) * β_t
-                    x = (torch.sqrt(alpha_hat_prev) * beta / (1 - alpha_hat)) * predicted \
-                        + ((torch.sqrt(alpha) * (1 - alpha_hat_prev)) / (1 - alpha_hat)) * x \
-                        + torch.sqrt(((1 - alpha_hat_prev) / (1 - alpha_hat)) * beta) * noise
-        model.train()
-        return x
+    def get_timestep_pairs(self) -> List[Tuple[int, int]]:
+        """Return all timestep pairs from T-1 down to 0."""
+        # [(T-1, T-2), (T-2, T-3), ..., (1, 0)]
+        return [(t, t - 1) for t in range(self.noise_steps - 1, 0, -1)]
+
+    @override
+    def denoising_step(
+        self,
+        x_t: torch.Tensor,
+        t: int,
+        t_prev: int,
+        model_output: torch.Tensor,
+        denoiser_output: str,
+        batch_size: int,
+    ) -> torch.Tensor:
+        """
+        DDPM reverse step: x_{t-1} from x_t.
+        
+        For denoiser_output='noise':
+            x_{t-1} = 1/√α_t * (x_t - β_t/√(1-ᾱ_t) * ε_θ) + σ_t * z
+            
+        For denoiser_output='original':
+            x_{t-1} = (√ᾱ_{t-1} * β_t)/(1-ᾱ_t) * x̂_0 + (√α_t * (1-ᾱ_{t-1}))/(1-ᾱ_t) * x_t + σ_t * z
+        """
+        t_tensor = torch.full((batch_size,), t, device=self.device, dtype=torch.long)
+        t_prev_tensor = torch.full((batch_size,), t_prev, device=self.device, dtype=torch.long)
+        
+        alpha = self.alpha[t_tensor][:, None, None]
+        alpha_hat = self.alpha_hat[t_tensor][:, None, None]
+        alpha_hat_prev = self.alpha_hat[t_prev_tensor][:, None, None] if t_prev >= 0 else torch.ones_like(alpha_hat)
+        beta = self.beta[t_tensor][:, None, None]
+        
+        # Add noise except at final step
+        if t > 1:
+            noise = torch.randn_like(x_t)
+        else:
+            noise = torch.zeros_like(x_t)
+        
+        # Posterior variance: σ_t² = β̃_t = (1-ᾱ_{t-1})/(1-ᾱ_t) * β_t
+        posterior_variance = ((1 - alpha_hat_prev) / (1 - alpha_hat)) * beta
+        
+        if denoiser_output == 'noise':
+            # x_{t-1} = 1/√α_t * (x_t - β_t/√(1-ᾱ_t) * ε_θ) + σ_t * z
+            x_prev = (1 / torch.sqrt(alpha)) * (x_t - ((1 - alpha) / torch.sqrt(1 - alpha_hat)) * model_output) \
+                + torch.sqrt(posterior_variance) * noise
+        elif denoiser_output == 'original':
+            # Posterior mean: μ̃_t = (√ᾱ_{t-1} * β_t)/(1-ᾱ_t) * x̂_0 + (√α_t * (1-ᾱ_{t-1}))/(1-ᾱ_t) * x_t
+            x_prev = (torch.sqrt(alpha_hat_prev) * beta / (1 - alpha_hat)) * model_output \
+                + ((torch.sqrt(alpha) * (1 - alpha_hat_prev)) / (1 - alpha_hat)) * x_t \
+                + torch.sqrt(posterior_variance) * noise
+        else:
+            raise ValueError(f"Unknown denoiser_output: {denoiser_output}")
+        
+        return x_prev
