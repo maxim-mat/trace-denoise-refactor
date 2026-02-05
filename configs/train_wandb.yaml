@@ -1,0 +1,56 @@
+# Training configuration with W&B logging
+# Usage: python main.py --config configs/train_wandb.yaml
+
+mode: train
+seed: 42
+
+data:
+  path: data/processed/50_salads_unified.pkl
+  num_classes: 19
+  train_split: 0.8
+  val_split: 0.1
+  test_split: 0.1
+  batch_size: 32
+  num_workers: 4
+  pin_memory: true
+
+model:
+  type: unet
+  time_dim: 128
+  max_input_dim: 0
+
+diffusion:
+  noise_steps: 1000
+  beta_start: 1e-4
+  beta_end: 0.02
+  sampler: ddpm
+  denoiser_output: original
+  conditional_dropout: 0.1
+  loss_type: cross_entropy
+
+trainer:
+  max_epochs: 100
+  accelerator: auto
+  devices: 1
+  precision: "32"
+  gradient_clip_val: 1.0
+  val_check_interval: 1.0
+  log_every_n_steps: 50
+
+optimizer:
+  learning_rate: 1e-4
+  scheduler: cosine
+
+callbacks:
+  early_stopping: true
+  early_stopping_patience: 15
+  save_top_k: 3
+  save_last: true
+
+logging:
+  logger: wandb
+  project_name: trace-denoise
+  experiment_name: null
+  save_dir: outputs
+  wandb_entity: null  # Set your W&B entity/team name
+  wandb_offline: false

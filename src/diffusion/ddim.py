@@ -1,5 +1,5 @@
 import torch
-from diffusion.base_diffusion import BaseDiffusion
+from .base_diffusion import BaseDiffusion
 from typing import override
 
 

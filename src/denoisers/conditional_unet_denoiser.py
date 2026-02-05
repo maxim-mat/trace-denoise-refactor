@@ -1,20 +1,28 @@
 import torch
 import torch.nn as nn
-from modules.DoubleConv import DoubleConv
-from modules.Up import Up
-from modules.Down import Down
-from modules.SelfAttention import SelfAttention
+from src.modules import DoubleConv, Up, Down, SelfAttention
 
 
 class ConditionalUnetDenoiser(nn.Module):
-    def __init__(self, in_ch, out_ch, max_input_dim, time_dim=128, device="cuda"):
+    """
+    Conditional U-Net denoiser architecture.
+    
+    Pure nn.Module - does not contain training logic.
+    Use with DiffusionLightningModule for training.
+    """
+    
+    def __init__(
+        self,
+        in_ch,
+        out_ch,
+        max_input_dim,
+        time_dim=128,
+    ):
         super().__init__()
-        self.device = device
         self.time_dim = time_dim
         self.max_input_dim = max_input_dim
-        self.loss = nn.CrossEntropyLoss()
-        self.alpha = torch.tensor(0.0)  # for compatibility with other denoisers
 
+        # Main path
         self.inc = DoubleConv(in_ch, 64)
         self.down1 = Down(64, 128, emb_dim=time_dim)
         self.sa1 = SelfAttention(128, max_input_dim // 2)
@@ -34,6 +42,7 @@ class ConditionalUnetDenoiser(nn.Module):
         self.up3 = Up(128, 64, emb_dim=time_dim)
         self.sa6 = SelfAttention(64, max_input_dim)
 
+        # Conditioning path
         self.inc_cond = DoubleConv(in_ch, 64)
         self.down1_cond = Down(64, 128, emb_dim=time_dim)
         self.sa1_cond = SelfAttention(128, max_input_dim // 2)
@@ -52,12 +61,13 @@ class ConditionalUnetDenoiser(nn.Module):
         self.sa5_cond = SelfAttention(64, max_input_dim // 2)
         self.up3_cond = Up(128, 64, emb_dim=time_dim)
         self.sa6_cond = SelfAttention(64, max_input_dim)
+        
         self.outc = nn.Conv1d(64, out_ch, kernel_size=1)
 
-    def pos_encoding(self, t, channels):
+    def pos_encoding(self, t, channels, device):
         inv_freq = 1.0 / (
-                10000
-                ** (torch.arange(0, channels, 2, device=self.device).float() / channels)
+            10000
+            ** (torch.arange(0, channels, 2, device=device).float() / channels)
         )
         pos_enc_a = torch.sin(t.repeat(1, channels // 2) * inv_freq)
         pos_enc_b = torch.cos(t.repeat(1, channels // 2) * inv_freq)
@@ -66,7 +76,7 @@ class ConditionalUnetDenoiser(nn.Module):
 
     def _forward_uncond(self, x, t):
         t = t.unsqueeze(-1).type(torch.float)
-        t = self.pos_encoding(t, self.time_dim)
+        t = self.pos_encoding(t, self.time_dim, x.device)
 
         x1 = self.inc(x)
         x2 = self.down1(x1, t)
@@ -81,21 +91,17 @@ class ConditionalUnetDenoiser(nn.Module):
         x4 = self.bot3(x4)
 
         x = self.up1(x4, x3, t)
-        del x4
-        del x3
         x = self.sa4(x)
         x = self.up2(x, x2, t)
-        del x2
         x = self.sa5(x)
         x = self.up3(x, x1, t)
-        del x1
         x = self.sa6(x)
         x = self.outc(x)
         return x
 
     def _forward_cond(self, x, y, t):
         t = t.unsqueeze(-1).type(torch.float)
-        t = self.pos_encoding(t, self.time_dim)
+        t = self.pos_encoding(t, self.time_dim, x.device)
 
         y1 = self.inc_cond(y)
         x1 = self.inc(x)
@@ -135,12 +141,18 @@ class ConditionalUnetDenoiser(nn.Module):
 
         return x
 
-    def forward(self, x, t, gt_x, gt_m=None, y=None, drop_matrix=True):
+    def forward(self, x, t, y=None):
+        """
+        Forward pass for denoising.
+        
+        Args:
+            x: Noisy input tensor (B, C, L)
+            t: Diffusion timestep (B,)
+            y: Optional conditioning tensor (B, C, L)
+            
+        Returns:
+            Denoised output tensor (B, C, L)
+        """
         if y is not None:
-            x_hat = self._forward_cond(x, y, t)
-        else:
-            x_hat = self._forward_uncond(x, t)
-        loss = self.loss(x_hat, gt_x) if gt_x is not None else None
-
-        # to match return signature of denoiser with matrix
-        return x_hat, None, loss, loss.item() if loss is not None else None, 0
+            return self._forward_cond(x, y, t)
+        return self._forward_uncond(x, t)

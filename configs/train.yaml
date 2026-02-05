@@ -1,0 +1,78 @@
+# Training configuration for Trace Denoising
+# Usage: python main.py --config configs/train.yaml
+
+mode: train
+seed: 42
+
+# Data settings
+data:
+  path: data/processed/50_salads_unified.pkl
+  num_classes: 19
+  train_split: 0.8
+  val_split: 0.1
+  test_split: 0.1
+  batch_size: 32
+  num_workers: 4
+  pin_memory: true
+  target_length: null  # null for dynamic padding
+
+# Model architecture
+model:
+  type: unet  # unet, unet_matrix, unet_graph
+  time_dim: 128
+  max_input_dim: 0  # 0 = auto-detect from data
+
+# Diffusion process
+diffusion:
+  noise_steps: 1000
+  beta_start: 1e-4
+  beta_end: 0.02
+  sampler: ddpm  # ddpm or ddim
+  ddim_inference_steps: 50
+  ddim_eta: 0.0
+  denoiser_output: original  # original or noise
+  conditional_dropout: 0.1
+  loss_type: cross_entropy  # mse, l1, cross_entropy
+
+# Training settings
+trainer:
+  max_epochs: 100
+  accelerator: auto
+  devices: 1
+  precision: "32"  # "32", "16-mixed", "bf16-mixed"
+  gradient_clip_val: 1.0
+  accumulate_grad_batches: 1
+  val_check_interval: 1.0
+  log_every_n_steps: 50
+  deterministic: false
+
+# Optimizer
+optimizer:
+  learning_rate: 1e-4
+  weight_decay: 0.0
+  scheduler: cosine
+  warmup_epochs: 0
+
+# Callbacks
+callbacks:
+  early_stopping: true
+  early_stopping_patience: 15
+  early_stopping_monitor: val_loss
+  early_stopping_mode: min
+  save_top_k: 3
+  save_last: true
+
+# Experiment logging
+logging:
+  logger: tensorboard  # tensorboard, mlflow, wandb, none
+  project_name: trace-denoise
+  experiment_name: null  # null = auto-generated
+  save_dir: outputs
+  # MLflow settings (when logger: mlflow)
+  mlflow_tracking_uri: null
+  # W&B settings (when logger: wandb)
+  wandb_entity: null
+  wandb_offline: false
+
+# Resume from checkpoint (null to start fresh)
+resume_from: null

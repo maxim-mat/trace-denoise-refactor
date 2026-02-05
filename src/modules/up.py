@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from modules.double_conv import DoubleConv
+from .double_conv import DoubleConv
 
 
 class Up(nn.Module):

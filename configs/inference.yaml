@@ -1,0 +1,38 @@
+# Inference configuration
+# Usage: python main.py --config configs/inference.yaml
+
+mode: inference
+seed: 42
+
+# Path to trained model checkpoint
+checkpoint_path: outputs/trace-denoise/checkpoints/best.ckpt
+
+data:
+  path: data/processed/50_salads_unified.pkl
+  num_classes: 19
+  batch_size: 16
+  num_workers: 4
+  pin_memory: true
+  # Keep same splits as training for evaluation
+  train_split: 0.8
+  val_split: 0.1
+  test_split: 0.1
+
+model:
+  type: unet
+  time_dim: 128
+  max_input_dim: 0
+
+# Use DDIM for faster inference
+diffusion:
+  sampler: ddim
+  noise_steps: 1000
+  ddim_inference_steps: 50  # Much faster than 1000 DDPM steps
+  ddim_eta: 0.0  # 0 = deterministic, 1 = DDPM-like stochasticity
+  denoiser_output: original
+
+trainer:
+  accelerator: auto
+
+logging:
+  save_dir: outputs
