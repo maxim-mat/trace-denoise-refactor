@@ -1,68 +1,92 @@
 import torch
 import torch.nn as nn
 
-from modules.DoubleConv import DoubleConv
-from modules.SelfAttention import SelfAttention
-from modules.GraphUp import GraphUp
-from modules.GraphDown import GraphDown
-from modules.Down import Down
-from modules.Up import Up
-from modules.GraphEncoder import GraphEncoder
-from modules.CrossAttention_old import CrossAttention
+from src.modules.double_conv import DoubleConv
+from src.modules.self_attention import SelfAttention
+from src.modules.down import Down
+from src.modules.up import Up
+from src.modules.graph_encoder import GraphEncoder
+from src.modules.cross_attention import CrossAttention
 
 
 class ConditionalUnetGraphDenoiser(nn.Module):
-    def __init__(self, in_ch, out_ch, max_input_dim, num_nodes, graph_data,
-                 embedding_dim, hidden_dim, pooling=None, time_dim=128, device="cuda"):
+    """
+    Conditional U-Net denoiser with graph-based conditioning.
+    
+    Uses a graph neural network to encode structural information (e.g., process model)
+    and injects it into the U-Net via cross-attention or additive fusion.
+    
+    Args:
+        in_ch: Number of input channels (num_classes)
+        out_ch: Number of output channels (num_classes)
+        max_input_dim: Maximum sequence length
+        num_nodes: Number of nodes in the graph
+        graph_data: Graph structure data (edge_index, etc.)
+        embedding_dim: Dimension of node embeddings
+        hidden_dim: Hidden dimension in GNN
+        pooling: Pooling method ('mean', 'max', None for no pooling)
+        time_dim: Dimension of time embeddings
+    """
+    
+    def __init__(
+        self,
+        in_ch,
+        out_ch,
+        max_input_dim,
+        num_nodes,
+        graph_data,
+        embedding_dim,
+        hidden_dim,
+        pooling=None,
+        time_dim=128,
+    ):
         super().__init__()
-        self.device = device
         self.time_dim = time_dim
         self.max_input_dim = max_input_dim
         self.graph_data = graph_data
         self.gnn_pooling = pooling
-        self.alpha = 0
-        self.loss = nn.CrossEntropyLoss()
 
-        # generated output u-net layers
+        # Main sequence U-Net path
         self.inc = DoubleConv(in_ch, 64)
         self.down1 = Down(64, 128, emb_dim=time_dim)
-        self.sa1 = SelfAttention(128, max_input_dim // 2)
+        self.sa1 = SelfAttention(128)
         self.down2 = Down(128, 256, emb_dim=time_dim)
-        self.sa2 = SelfAttention(256, max_input_dim // 4)
+        self.sa2 = SelfAttention(256)
         self.down3 = Down(256, 256, emb_dim=time_dim)
-        self.sa3 = SelfAttention(256, max_input_dim // 8)
+        self.sa3 = SelfAttention(256)
 
         self.bot1 = DoubleConv(256, 512)
         self.bot2 = DoubleConv(512, 512)
         self.bot3 = DoubleConv(512, 256)
 
         self.up1 = Up(512, 128, emb_dim=time_dim)
-        self.sa4 = SelfAttention(128, max_input_dim // 4)
+        self.sa4 = SelfAttention(128)
         self.up2 = Up(256, 64, emb_dim=time_dim)
-        self.sa5 = SelfAttention(64, max_input_dim // 2)
+        self.sa5 = SelfAttention(64)
         self.up3 = Up(128, 64, emb_dim=time_dim)
-        self.sa6 = SelfAttention(64, max_input_dim)
+        self.sa6 = SelfAttention(64)
 
-        # guidance sk trace u-net layers
+        # Conditioning path
         self.inc_cond = DoubleConv(in_ch, 64)
         self.down1_cond = Down(64, 128, emb_dim=time_dim)
-        self.sa1_cond = SelfAttention(128, max_input_dim // 2)
+        self.sa1_cond = SelfAttention(128)
         self.down2_cond = Down(128, 256, emb_dim=time_dim)
-        self.sa2_cond = SelfAttention(256, max_input_dim // 4)
+        self.sa2_cond = SelfAttention(256)
         self.down3_cond = Down(256, 256, emb_dim=time_dim)
-        self.sa3_cond = SelfAttention(256, max_input_dim // 8)
+        self.sa3_cond = SelfAttention(256)
 
         self.bot1_cond = DoubleConv(256, 512)
         self.bot2_cond = DoubleConv(512, 512)
         self.bot3_cond = DoubleConv(512, 256)
 
         self.up1_cond = Up(512, 128, emb_dim=time_dim)
-        self.sa4_cond = SelfAttention(128, max_input_dim // 4)
+        self.sa4_cond = SelfAttention(128)
         self.up2_cond = Up(256, 64, emb_dim=time_dim)
-        self.sa5_cond = SelfAttention(64, max_input_dim // 2)
+        self.sa5_cond = SelfAttention(64)
         self.up3_cond = Up(128, 64, emb_dim=time_dim)
-        self.sa6_cond = SelfAttention(64, max_input_dim)
+        self.sa6_cond = SelfAttention(64)
 
+        # Graph encoders at different scales
         self.genc1 = GraphEncoder(num_nodes, embedding_dim, hidden_dim, num_layers=1, output_dim=64, pooling=pooling)
         self.genc2 = GraphEncoder(num_nodes, embedding_dim, hidden_dim, num_layers=2, output_dim=128, pooling=pooling)
         self.genc3 = GraphEncoder(num_nodes, embedding_dim, hidden_dim, num_layers=3, output_dim=256, pooling=pooling)
@@ -77,36 +101,38 @@ class ConditionalUnetGraphDenoiser(nn.Module):
         self.genc5_cond = GraphEncoder(num_nodes, embedding_dim, hidden_dim, num_layers=2, output_dim=128, pooling=pooling)
         self.genc6_cond = GraphEncoder(num_nodes, embedding_dim, hidden_dim, num_layers=1, output_dim=64, pooling=pooling)
 
+        # Cross-attention layers for graph fusion (when not using pooling)
         if self.gnn_pooling is None:
-            self.ca1 = CrossAttention(128, max_input_dim // 2)
-            self.ca2 = CrossAttention(256, max_input_dim // 4)
-            self.ca3 = CrossAttention(256, max_input_dim // 8)
-            self.ca4 = CrossAttention(128, max_input_dim // 4)
-            self.ca5 = CrossAttention(64, max_input_dim // 2)
-            self.ca6 = CrossAttention(64, max_input_dim)
+            self.ca1 = CrossAttention(128)
+            self.ca2 = CrossAttention(256)
+            self.ca3 = CrossAttention(256)
+            self.ca4 = CrossAttention(128)
+            self.ca5 = CrossAttention(64)
+            self.ca6 = CrossAttention(64)
 
-            self.ca1_cond = CrossAttention(128, max_input_dim // 2)
-            self.ca2_cond = CrossAttention(256, max_input_dim // 4)
-            self.ca3_cond = CrossAttention(256, max_input_dim // 8)
-            self.ca4_cond = CrossAttention(128, max_input_dim // 4)
-            self.ca5_cond = CrossAttention(64, max_input_dim // 2)
-            self.ca6_cond = CrossAttention(64, max_input_dim)
+            self.ca1_cond = CrossAttention(128)
+            self.ca2_cond = CrossAttention(256)
+            self.ca3_cond = CrossAttention(256)
+            self.ca4_cond = CrossAttention(128)
+            self.ca5_cond = CrossAttention(64)
+            self.ca6_cond = CrossAttention(64)
 
         self.outc = nn.Conv1d(64, out_ch, kernel_size=1)
 
-    def pos_encoding(self, t, channels):
+    def pos_encoding(self, t, channels, device):
+        """Generate sinusoidal positional encoding."""
         inv_freq = 1.0 / (
-                10000
-                ** (torch.arange(0, channels, 2, device=self.device).float() / channels)
+            10000 ** (torch.arange(0, channels, 2, device=device).float() / channels)
         )
         pos_enc_a = torch.sin(t.repeat(1, channels // 2) * inv_freq)
         pos_enc_b = torch.cos(t.repeat(1, channels // 2) * inv_freq)
         pos_enc = torch.cat([pos_enc_a, pos_enc_b], dim=-1)
         return pos_enc
 
-    def _forward_uncond_no_graph(self, x, t):
+    def _forward_uncond(self, x, t):
+        """Unconditional forward without graph."""
         t = t.unsqueeze(-1).type(torch.float)
-        t = self.pos_encoding(t, self.time_dim)
+        t = self.pos_encoding(t, self.time_dim, x.device)
 
         x1 = self.inc(x)
         x2 = self.down1(x1, t)
@@ -129,9 +155,10 @@ class ConditionalUnetGraphDenoiser(nn.Module):
         x = self.outc(x)
         return x
 
-    def _forward_cond_no_graph(self, x, y, t):
+    def _forward_cond(self, x, y, t):
+        """Conditional forward without graph."""
         t = t.unsqueeze(-1).type(torch.float)
-        t = self.pos_encoding(t, self.time_dim)
+        t = self.pos_encoding(t, self.time_dim, x.device)
 
         y1 = self.inc_cond(y)
         x1 = self.inc(x)
@@ -172,15 +199,15 @@ class ConditionalUnetGraphDenoiser(nn.Module):
         return x
 
     def _forward_uncond_graph(self, x, t):
+        """Unconditional forward with graph fusion."""
         t = t.unsqueeze(-1).type(torch.float)
-        t = self.pos_encoding(t, self.time_dim)
+        t = self.pos_encoding(t, self.time_dim, x.device)
 
         batch_size = x.size(0)
         g = self.graph_data
 
         x1 = self.inc(x)
         if self.gnn_pooling is None:
-            # g1 = self.genc1(g).view(batch_size, x1.shape[1], -1)
             x2 = self.down1(x1, t)
             x2 = self.sa1(x2)
             g2 = self.genc2(g).view(-1, g.num_nodes).unsqueeze(0).repeat(batch_size, 1, 1)
@@ -196,7 +223,6 @@ class ConditionalUnetGraphDenoiser(nn.Module):
             g4 = self.genc4(g).view(-1, g.num_nodes).unsqueeze(0).repeat(batch_size, 1, 1)
             x4 = self.ca3(x4, g4, g4)
         else:
-            # g1 = self.genc1(g).view(1, -1, 1).repeat(batch_size, 1, x1.size(2))
             x2 = self.down1(x1, t)
             x2 = self.sa1(x2)
 
@@ -242,8 +268,9 @@ class ConditionalUnetGraphDenoiser(nn.Module):
         return x
 
     def _forward_cond_graph(self, x, y, t):
+        """Conditional forward with graph fusion."""
         t = t.unsqueeze(-1).type(torch.float)
-        t = self.pos_encoding(t, self.time_dim)
+        t = self.pos_encoding(t, self.time_dim, x.device)
 
         batch_size = x.size(0)
         g = self.graph_data
@@ -251,7 +278,6 @@ class ConditionalUnetGraphDenoiser(nn.Module):
         x1 = self.inc(x)
         y1 = self.inc_cond(y)
         if self.gnn_pooling is None:
-            # g1 = self.genc1(g).view(batch_size, x1.shape[1], -1)
             x2 = self.down1(x1 + y1, t)
             x2 = self.sa1(x2)
             y2 = self.down1_cond(y1 + x1, t)
@@ -279,7 +305,6 @@ class ConditionalUnetGraphDenoiser(nn.Module):
             x4 = self.ca3(x4, g4, g4)
             y4 = self.ca3_cond(y4, g4_cond, g4_cond)
         else:
-            # g1 = self.genc1(g).view(1, -1, 1).repeat(batch_size, 1, x1.size(2))
             x2 = self.down1(x1 + y1, t)
             x2 = self.sa1(x2)
             y2 = self.down1_cond(y1 + x1, t)
@@ -344,7 +369,7 @@ class ConditionalUnetGraphDenoiser(nn.Module):
             y = self.up2_cond(y + x + g5_cond, y2, t)
             y = self.sa5_cond(y)
 
-            g6 = self.genc6(g).view(1, -1, 1).repeat(batch_size, 1, x.size(2))
+            g6 = self.genc6(g).view(1, -1, 1).repeat(batch_size, 1, x_next.size(2))
             g6_cond = self.genc6_cond(g).view(1, -1, 1).repeat(batch_size, 1, y.size(2))
             x = self.up3(x_next + y + g6, x1, t)
             x = self.sa6(x)
@@ -354,16 +379,26 @@ class ConditionalUnetGraphDenoiser(nn.Module):
         x = self.outc(x + y)
         return x
 
-    def forward(self, x, t, gt_x, gt_m, y=None, drop_graph=False):
-        if not drop_graph:
+    def forward(self, x, t, y=None, use_graph=True):
+        """
+        Forward pass for denoising.
+        
+        Args:
+            x: Noisy input tensor (B, C, L)
+            t: Diffusion timestep (B,)
+            y: Optional conditioning tensor (B, C, L)
+            use_graph: Whether to use graph conditioning
+            
+        Returns:
+            x_hat: Denoised output tensor (B, C, L)
+        """
+        if use_graph:
             if y is not None:
-                x_hat = self._forward_cond_graph(x, y, t)
+                return self._forward_cond_graph(x, y, t)
             else:
-                x_hat = self._forward_uncond_graph(x, t)
+                return self._forward_uncond_graph(x, t)
         else:
             if y is not None:
-                x_hat = self._forward_cond_no_graph(x, y, t)
+                return self._forward_cond(x, y, t)
             else:
-                x_hat = self._forward_uncond_no_graph(x, t)
-        loss = self.loss(x_hat, gt_x) if gt_x is not None else None
-        return x_hat, None, loss, loss.item() if loss is not None else None, 0
+                return self._forward_uncond(x, t)

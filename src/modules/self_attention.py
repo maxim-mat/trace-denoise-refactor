@@ -2,6 +2,13 @@ import torch.nn as nn
 
 
 class SelfAttention(nn.Module):
+    """
+    Self-attention module for 1D sequences.
+    
+    Args:
+        channels: Number of input/output channels
+        num_heads: Number of attention heads (default: 2)
+    """
     def __init__(self, channels, num_heads=2):
         super(SelfAttention, self).__init__()
         self.channels = channels

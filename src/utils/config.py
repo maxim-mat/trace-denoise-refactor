@@ -4,6 +4,27 @@ from omegaconf import MISSING
 
 
 @dataclass
+class AuxiliaryLossConfig:
+    """
+    Configuration for an auxiliary loss term.
+    
+    Used for multi-output denoisers like the matrix denoiser that return
+    additional outputs beyond the primary diffusion prediction.
+    
+    Example for matrix denoiser:
+        auxiliary_losses:
+          - output_index: 1          # m_hat is the 2nd output (index 1)
+            loss_type: bce_logits    # Binary cross-entropy with logits
+            weight: 0.5              # Weight relative to primary loss
+            target: labels           # Compare against batch labels
+    """
+    output_index: int = 1  # Index in auxiliary outputs tuple (1 = first auxiliary)
+    loss_type: Literal["mse", "l1", "bce", "bce_logits", "cross_entropy"] = "bce_logits"
+    weight: float = 1.0  # Weight relative to primary loss
+    target: Literal["ground_truth", "labels"] = "labels"  # What to compare against
+
+
+@dataclass
 class DataConfig:
     """Data configuration."""
     path: str = MISSING
@@ -27,7 +48,15 @@ class ModelConfig:
 
 @dataclass
 class DiffusionConfig:
-    """Diffusion process configuration."""
+    """
+    Diffusion process configuration.
+    
+    Loss computation:
+    - Primary loss: Applied to the first output of the denoiser (the diffusion prediction)
+    - Auxiliary losses: Applied to additional outputs (e.g., matrix prediction)
+    
+    The denoiser should return (primary, *auxiliaries) where primary is the noise/x0 prediction.
+    """
     noise_steps: int = 1000
     beta_start: float = 1e-4
     beta_end: float = 0.02
@@ -36,7 +65,10 @@ class DiffusionConfig:
     ddim_eta: float = 0.0
     denoiser_output: Literal["noise", "original"] = "original"
     conditional_dropout: float = 0.0
+    # Primary loss (applied to first denoiser output vs noise/x0)
     loss_type: Literal["mse", "l1", "cross_entropy"] = "cross_entropy"
+    # Auxiliary losses for multi-output denoisers (empty list = no auxiliary losses)
+    auxiliary_losses: List[AuxiliaryLossConfig] = field(default_factory=list)
 
 
 @dataclass

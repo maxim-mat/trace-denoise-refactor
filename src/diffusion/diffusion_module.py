@@ -2,12 +2,22 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import lightning as L
-from typing import Literal, Optional, Dict, Any, List
+from typing import Literal, Optional, Dict, Any, List, Tuple, Union
+from dataclasses import dataclass
 
 from .base_diffusion import BaseDiffusion
 from .ddpm import DDPM
 from .ddim import DDIM
 from src.utils.metrics import create_metric_collection
+
+
+@dataclass
+class AuxiliaryLossSpec:
+    """Runtime specification for an auxiliary loss (parsed from config)."""
+    output_index: int  # Index in auxiliary outputs tuple
+    loss_fn: nn.Module  # Loss function instance
+    weight: float  # Weight for this loss
+    target: str  # "ground_truth" or "labels"
 
 
 class DiffusionLightningModule(L.LightningModule):
@@ -17,13 +27,14 @@ class DiffusionLightningModule(L.LightningModule):
     Handles the forward diffusion (noising) during training and 
     reverse diffusion (sampling) during inference.
     
+    Supports denoisers with multiple outputs following the convention that
+    the PRIMARY diffusion output is ALWAYS FIRST. Auxiliary outputs (e.g.,
+    matrix predictions) follow.
+    
     IMPORTANT: Metrics are computed on the FULL reverse diffusion output,
     not on single-step denoising predictions. This means:
     - Training loss: computed on single-step predictions (efficient)
     - Validation/Test metrics: computed after running full reverse diffusion (expensive)
-    
-    This is necessary because for inverse problems, the quality of the solution
-    can only be assessed after the complete sampling process.
     """
     
     def __init__(
@@ -37,6 +48,8 @@ class DiffusionLightningModule(L.LightningModule):
         loss_type: Literal["mse", "l1", "cross_entropy"] = "cross_entropy",
         denoiser_output: Literal["noise", "original"] = "original",
         conditional_dropout: float = 0.0,
+        # Auxiliary losses for multi-output denoisers
+        auxiliary_losses: Optional[List[Dict[str, Any]]] = None,
         # Denoiser config for checkpoint restoration
         denoiser_config: Optional[Dict[str, Any]] = None,
         # Metrics configuration
@@ -54,20 +67,25 @@ class DiffusionLightningModule(L.LightningModule):
     ):
         """
         Args:
-            denoiser: Neural network that predicts noise or original from noisy input
+            denoiser: Neural network that predicts noise or original from noisy input.
+                      Returns tensor or tuple (primary_output, *auxiliary_outputs).
             diffusion: Diffusion process (DDPM, DDIM, etc.). If None, creates DDPM.
             noise_steps: Number of diffusion steps
             beta_start: Starting value for noise schedule
             beta_end: Ending value for noise schedule
             learning_rate: Learning rate for optimizer
-            loss_type: Type of loss function
+            loss_type: Type of loss function for primary output
             denoiser_output: What the denoiser predicts - 'noise' or 'original'
             conditional_dropout: Probability of dropping conditioning during training
+            auxiliary_losses: List of auxiliary loss configs for multi-output denoisers.
+                Each dict has: output_index, loss_type, weight, target.
+                Example for matrix denoiser: [{"output_index": 1, "loss_type": "bce_logits", 
+                    "weight": 0.5, "target": "labels"}]
             denoiser_config: Config dict for reconstructing denoiser from checkpoint
             num_classes: Number of classes for metrics (required if using metrics)
             val_metrics: List of metric names to compute during validation
             test_metrics: List of metric names to compute during testing
-            eval_every_n_epochs: Run full metrics evaluation every N epochs (0 = never during training)
+            eval_every_n_epochs: Run full metrics evaluation every N epochs (0 = never)
             eval_use_ddim: Whether to use DDIM for faster evaluation sampling
             eval_ddim_steps: Number of DDIM steps when eval_use_ddim=True
             verbose_test: Enable trajectory evaluation during test (for inference analysis)
@@ -77,13 +95,11 @@ class DiffusionLightningModule(L.LightningModule):
         super().__init__()
         
         # Store denoiser config for checkpoint loading
-        # Extract from denoiser if not provided
         if denoiser_config is None and denoiser is not None:
             denoiser_config = {
                 "class": denoiser.__class__.__name__,
                 "module": denoiser.__class__.__module__,
             }
-            # Try to get init args from denoiser if it has them
             if hasattr(denoiser, 'time_dim'):
                 denoiser_config["time_dim"] = denoiser.time_dim
             if hasattr(denoiser, 'max_input_dim'):
@@ -110,15 +126,19 @@ class DiffusionLightningModule(L.LightningModule):
         # Storage for trajectory analysis results (populated during verbose test)
         self.trajectory_results: List[Dict[str, Any]] = []
         
-        # Set up loss function
-        if loss_type == "mse":
-            self.loss_fn = nn.MSELoss()
-        elif loss_type == "l1":
-            self.loss_fn = nn.L1Loss()
-        elif loss_type == "cross_entropy":
-            self.loss_fn = nn.CrossEntropyLoss()
-        else:
-            raise ValueError(f"Unknown loss type: {loss_type}")
+        # Set up primary loss function
+        self.loss_fn = self._create_loss_fn(loss_type)
+        
+        # Set up auxiliary losses for multi-output denoisers
+        self.auxiliary_loss_specs: List[AuxiliaryLossSpec] = []
+        if auxiliary_losses:
+            for aux_cfg in auxiliary_losses:
+                self.auxiliary_loss_specs.append(AuxiliaryLossSpec(
+                    output_index=aux_cfg.get("output_index", 1),
+                    loss_fn=self._create_loss_fn(aux_cfg.get("loss_type", "mse")),
+                    weight=aux_cfg.get("weight", 1.0),
+                    target=aux_cfg.get("target", "ground_truth"),
+                ))
         
         # Store diffusion process (will be initialized on first forward if None)
         self._diffusion = diffusion
@@ -147,8 +167,6 @@ class DiffusionLightningModule(L.LightningModule):
         if num_classes is None or num_classes <= 0:
             return
         
-        # Note: No train_metrics - computing metrics during training would require
-        # running full reverse diffusion which is too expensive
         if val_metrics:
             self.val_metrics = create_metric_collection(
                 val_metrics, num_classes=num_classes, prefix="val/"
@@ -168,6 +186,21 @@ class DiffusionLightningModule(L.LightningModule):
         self.register_buffer('alpha', alpha)
         self.register_buffer('alpha_hat', alpha_hat)
     
+    def _create_loss_fn(self, loss_type: str) -> nn.Module:
+        """Create a loss function from type string."""
+        if loss_type == "mse":
+            return nn.MSELoss()
+        elif loss_type == "l1":
+            return nn.L1Loss()
+        elif loss_type == "cross_entropy":
+            return nn.CrossEntropyLoss()
+        elif loss_type == "bce":
+            return nn.BCELoss()
+        elif loss_type == "bce_logits":
+            return nn.BCEWithLogitsLoss()
+        else:
+            raise ValueError(f"Unknown loss type: {loss_type}")
+    
     @property
     def diffusion(self) -> BaseDiffusion:
         """Get diffusion process, creating default DDPM if not set."""
@@ -178,7 +211,6 @@ class DiffusionLightningModule(L.LightningModule):
                 beta_end=self.beta_end,
                 device=self.device,
             )
-        # Update device if needed
         if hasattr(self._diffusion, 'device') and self._diffusion.device != self.device:
             self._diffusion.device = self.device
             self._diffusion.beta = self._diffusion.beta.to(self.device)
@@ -194,14 +226,13 @@ class DiffusionLightningModule(L.LightningModule):
                 self._eval_diffusion = DDIM(
                     noise_steps=self.noise_steps,
                     inference_steps=self.eval_ddim_steps,
-                    eta=0.0,  # Deterministic for evaluation
+                    eta=0.0,
                     beta_start=self.beta_start,
                     beta_end=self.beta_end,
                     device=self.device,
                 )
             else:
                 self._eval_diffusion = self.diffusion
-        # Update device if needed
         if hasattr(self._eval_diffusion, 'device') and self._eval_diffusion.device != self.device:
             self._eval_diffusion.device = self.device
             self._eval_diffusion.beta = self._eval_diffusion.beta.to(self.device)
@@ -222,16 +253,7 @@ class DiffusionLightningModule(L.LightningModule):
         metrics: Optional[List[str]] = None,
         save_every: int = 1,
     ):
-        """
-        Enable verbose test mode for trajectory analysis during inference.
-        
-        Call this before running trainer.test() to analyze the reverse
-        diffusion process at each timestep.
-        
-        Args:
-            metrics: Metrics to compute (defaults to current trajectory_metrics)
-            save_every: Evaluate every N steps (1 = all steps)
-        """
+        """Enable verbose test mode for trajectory analysis during inference."""
         self.verbose_test = True
         if metrics is not None:
             self.trajectory_metrics = metrics
@@ -243,12 +265,7 @@ class DiffusionLightningModule(L.LightningModule):
         self.verbose_test = False
     
     def get_trajectory_dataframe(self):
-        """
-        Convert trajectory results to a pandas DataFrame for analysis.
-        
-        Returns:
-            DataFrame with columns: batch_idx, step, timestep, and all metrics
-        """
+        """Convert trajectory results to a pandas DataFrame for analysis."""
         try:
             import pandas as pd
         except ImportError:
@@ -288,6 +305,81 @@ class DiffusionLightningModule(L.LightningModule):
         """Forward pass through denoiser."""
         return self.denoiser(x, t, y)
     
+    def _extract_primary_output(
+        self,
+        denoiser_output: Union[torch.Tensor, Tuple[torch.Tensor, ...]]
+    ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, ...]]]:
+        """
+        Extract the primary output from denoiser prediction.
+        
+        Handles both single-tensor outputs and multi-output denoisers.
+        Convention: primary diffusion output is always first.
+        
+        Args:
+            denoiser_output: Either a tensor or a tuple (primary, *auxiliaries)
+            
+        Returns:
+            Tuple of (primary_output, auxiliary_outputs) where auxiliary_outputs
+            may be None for single-output denoisers.
+        """
+        if isinstance(denoiser_output, tuple):
+            return denoiser_output[0], denoiser_output[1:]
+        return denoiser_output, None
+    
+    def _compute_auxiliary_loss(
+        self,
+        auxiliary_outputs: Optional[Tuple[torch.Tensor, ...]],
+        ground_truth: torch.Tensor,
+        labels: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Compute auxiliary losses based on configuration.
+        
+        Losses are configured via auxiliary_losses parameter, not in the denoiser.
+        This keeps denoisers as pure architectures.
+        
+        Args:
+            auxiliary_outputs: Tuple of auxiliary outputs from denoiser
+            ground_truth: The original clean data (x)
+            labels: Batch labels (for auxiliary outputs that compare against labels)
+            
+        Returns:
+            Total weighted auxiliary loss (0 if no auxiliary outputs or no configs)
+        """
+        if auxiliary_outputs is None or not self.auxiliary_loss_specs:
+            return torch.tensor(0.0, device=self.device)
+        
+        total_aux_loss = torch.tensor(0.0, device=self.device)
+        
+        for spec in self.auxiliary_loss_specs:
+            # Get the auxiliary output by index (1-indexed: 1 means first auxiliary)
+            aux_idx = spec.output_index - 1
+            if aux_idx < 0 or aux_idx >= len(auxiliary_outputs):
+                continue
+            
+            aux_output = auxiliary_outputs[aux_idx]
+            
+            # Determine target based on config
+            if spec.target == "ground_truth":
+                target = ground_truth
+            else:  # "labels"
+                # For matrix denoiser: labels may need to be broadcast to match output shape
+                target = labels
+                # Handle shape mismatch (e.g., matrix output shape differs from labels)
+                if aux_output.shape != target.shape:
+                    # Try to broadcast labels to match auxiliary output
+                    if aux_output.dim() == 4 and target.dim() <= 2:
+                        # Matrix case: aux_output is (B, C, H, W), labels might need expansion
+                        target = target.unsqueeze(1).expand_as(aux_output).float()
+                    elif aux_output.dim() == 4:
+                        target = target.expand_as(aux_output).float()
+            
+            # Compute weighted loss
+            aux_loss = spec.loss_fn(aux_output, target)
+            total_aux_loss = total_aux_loss + spec.weight * aux_loss
+        
+        return total_aux_loss
+    
     def _update_metrics(
         self,
         sampled: torch.Tensor,
@@ -296,21 +388,9 @@ class DiffusionLightningModule(L.LightningModule):
         metrics_collection,
         stage: str,
     ):
-        """
-        Update metrics based on full reverse diffusion samples vs ground truth.
-        
-        Args:
-            sampled: Sampled output from full reverse diffusion (B, C, L) - logits
-            ground_truth: Ground truth clean data (B, C, L)
-            labels: Ground truth class labels (B, L)
-            metrics_collection: MetricCollection to update
-            stage: 'val' or 'test'
-        """
+        """Update metrics based on full reverse diffusion samples vs ground truth."""
         if metrics_collection is None:
             return
-        
-        # sampled shape: (B, C, L) - these are logits from the reverse diffusion
-        # labels shape: (B, L) - ground truth class indices
         
         # Get predictions as class probabilities and indices
         pred_probs = F.softmax(sampled, dim=1)  # (B, C, L)
@@ -318,9 +398,9 @@ class DiffusionLightningModule(L.LightningModule):
         
         # Flatten for metrics: (B*L, C) and (B*L,)
         batch_size, num_classes, seq_len = sampled.shape
-        pred_probs_flat = pred_probs.permute(0, 2, 1).reshape(-1, num_classes)  # (B*L, C)
-        pred_classes_flat = pred_classes.reshape(-1)  # (B*L,)
-        labels_flat = labels.reshape(-1).long()  # (B*L,)
+        pred_probs_flat = pred_probs.permute(0, 2, 1).reshape(-1, num_classes)
+        pred_classes_flat = pred_classes.reshape(-1)
+        labels_flat = labels.reshape(-1).long()
         
         # Update metrics
         for name, metric in metrics_collection.items():
@@ -332,26 +412,48 @@ class DiffusionLightningModule(L.LightningModule):
             else:
                 metric.update(pred_classes_flat, labels_flat)
     
+    def _get_primary_output_model(self):
+        """
+        Get a wrapper around the denoiser that always returns primary output only.
+        
+        This is needed for sampling, where the diffusion process expects
+        a single tensor output from the model.
+        """
+        denoiser = self.denoiser
+        extract_fn = self._extract_primary_output
+        
+        class PrimaryOutputWrapper:
+            """Wrapper that extracts primary output from multi-output denoisers."""
+            def __init__(self, model, extract_primary):
+                self.model = model
+                self.extract_primary = extract_primary
+            
+            def __call__(self, x, t, y=None):
+                output = self.model(x, t, y)
+                primary, _ = self.extract_primary(output)
+                return primary
+            
+            def eval(self):
+                self.model.eval()
+                return self
+            
+            def train(self, mode=True):
+                self.model.train(mode)
+                return self
+        
+        return PrimaryOutputWrapper(denoiser, extract_fn)
+    
     def _run_full_reverse_diffusion(
         self,
         conditioning: torch.Tensor,
         shape: tuple,
     ) -> torch.Tensor:
-        """
-        Run full reverse diffusion process for evaluation.
-        
-        Args:
-            conditioning: Conditioning tensor (B, C, L) - the noisy/corrupted input
-            shape: Shape of output (C, L)
-            
-        Returns:
-            Sampled output (B, C, L)
-        """
+        """Run full reverse diffusion process for evaluation."""
         batch_size = conditioning.shape[0]
+        model = self._get_primary_output_model()
         
-        # Use eval_diffusion (DDIM for speed if configured)
         return self.eval_diffusion.sample(
-            model=self.denoiser,
+            model=model,
             sample_size=batch_size,
             shape=shape,
             y=conditioning,
@@ -362,20 +464,18 @@ class DiffusionLightningModule(L.LightningModule):
         """
         Training step with forward diffusion (Algorithm 1).
         
-        Computes single-step denoising loss only. Metrics require full reverse
-        diffusion and are computed during validation/test.
+        Computes single-step denoising loss. Supports multi-output denoisers
+        by extracting primary output for loss computation.
         
         Expected batch format: (labels, data) where data is (B, L, C).
         """
         labels, data = batch
-        
-        # Transpose from (B, L, C) to (B, C, L) for conv1d
-        x = data.permute(0, 2, 1).float()
+        x = data.permute(0, 2, 1).float()  # (B, C, L)
         
         # Sample timesteps
         t = self.sample_timesteps(x.shape[0])
         
-        # Forward diffusion: add noise (Algorithm 1, line 4-5)
+        # Forward diffusion: add noise
         x_t, noise = self.noise_data(x, t)
         
         # Apply conditional dropout
@@ -383,27 +483,36 @@ class DiffusionLightningModule(L.LightningModule):
         if self.conditional_dropout > 0 and torch.rand(1).item() < self.conditional_dropout:
             y = None
         else:
-            # Use the original data as conditioning
             y = x
         
-        # Predict (single denoising step)
-        predicted = self.denoiser(x_t, t, y)
-        
-        # Compute loss based on what denoiser predicts
+        # Get target based on denoiser_output setting
         if self.denoiser_output == "noise":
             target = noise
-        else:  # "original"
+        else:
             target = x
         
-        loss = self.loss_fn(predicted, target)
+        # Predict and extract primary output
+        denoiser_out = self.denoiser(x_t, t, y)
+        predicted, auxiliary_outputs = self._extract_primary_output(denoiser_out)
+        
+        # Compute primary loss
+        primary_loss = self.loss_fn(predicted, target)
+        
+        # Compute auxiliary loss based on config (not from denoiser)
+        auxiliary_loss = self._compute_auxiliary_loss(auxiliary_outputs, x, labels)
+        
+        # Total loss
+        loss = primary_loss + auxiliary_loss
         
         self.log("train_loss", loss, prog_bar=True)
+        if self.auxiliary_loss_specs:
+            self.log("train_primary_loss", primary_loss, prog_bar=False)
+            self.log("train_auxiliary_loss", auxiliary_loss, prog_bar=False)
         
         return loss
     
     def on_before_optimizer_step(self, optimizer):
         """Log gradient norm before optimizer step."""
-        # Compute gradient norm across all parameters
         grad_norm = self._compute_grad_norm()
         if grad_norm is not None:
             self.log("grad_norm", grad_norm, prog_bar=False)
@@ -425,7 +534,6 @@ class DiffusionLightningModule(L.LightningModule):
         """Check if current epoch should run full evaluation."""
         if self.eval_every_n_epochs <= 0:
             return False
-        # current_epoch is 0-indexed, so epoch 0, N, 2N, etc. are eval epochs
         return self.current_epoch % self.eval_every_n_epochs == 0
     
     def validation_step(self, batch, batch_idx):
@@ -436,12 +544,14 @@ class DiffusionLightningModule(L.LightningModule):
         - Every N epochs: Run full reverse diffusion and compute metrics (expensive)
         """
         labels, data = batch
-        x = data.permute(0, 2, 1).float()  # Ground truth: (B, C, L)
+        x = data.permute(0, 2, 1).float()
         
-        # Always compute single-step loss for monitoring training progress
+        # Compute single-step loss
         t = self.sample_timesteps(x.shape[0])
         x_t, noise = self.noise_data(x, t)
-        predicted = self.denoiser(x_t, t, x)  # y=x for conditioning
+        
+        denoiser_out = self.denoiser(x_t, t, x)
+        predicted, _ = self._extract_primary_output(denoiser_out)
         
         if self.denoiser_output == "noise":
             target = noise
@@ -452,18 +562,12 @@ class DiffusionLightningModule(L.LightningModule):
         self.log("val_loss", loss, prog_bar=True, sync_dist=True)
         
         # Run full reverse diffusion for metrics only on eval epochs
-        is_eval_epoch = self._is_eval_epoch()
-        if self.val_metrics is not None and is_eval_epoch:
-            shape = (x.shape[1], x.shape[2])  # (C, L)
+        if self.val_metrics is not None and self._is_eval_epoch():
+            shape = (x.shape[1], x.shape[2])
             
-            # Sample from full reverse diffusion with conditioning
             with torch.no_grad():
-                sampled = self._run_full_reverse_diffusion(
-                    conditioning=x,  # Use ground truth as conditioning
-                    shape=shape,
-                )
+                sampled = self._run_full_reverse_diffusion(conditioning=x, shape=shape)
             
-            # Update metrics: compare sampled output to ground truth
             self._update_metrics(sampled, x, labels, self.val_metrics, "val")
         
         return loss
@@ -483,12 +587,14 @@ class DiffusionLightningModule(L.LightningModule):
         along the reverse diffusion trajectory for analysis.
         """
         labels, data = batch
-        x = data.permute(0, 2, 1).float()  # Ground truth: (B, C, L)
+        x = data.permute(0, 2, 1).float()
         
         # Compute single-step loss
         t = self.sample_timesteps(x.shape[0])
         x_t, noise = self.noise_data(x, t)
-        predicted = self.denoiser(x_t, t, x)
+        
+        denoiser_out = self.denoiser(x_t, t, x)
+        predicted, _ = self._extract_primary_output(denoiser_out)
         
         if self.denoiser_output == "noise":
             target = noise
@@ -507,20 +613,16 @@ class DiffusionLightningModule(L.LightningModule):
                 metric_names=self.trajectory_metrics,
                 save_every=self.trajectory_save_every,
             )
-            # Store with batch info for later analysis
             self.trajectory_results.append({
                 "batch_idx": batch_idx,
                 "trajectory": batch_trajectory,
             })
         # Standard test: just final sample metrics
         elif self.test_metrics is not None:
-            shape = (x.shape[1], x.shape[2])  # (C, L)
+            shape = (x.shape[1], x.shape[2])
             
             with torch.no_grad():
-                sampled = self._run_full_reverse_diffusion(
-                    conditioning=x,
-                    shape=shape,
-                )
+                sampled = self._run_full_reverse_diffusion(conditioning=x, shape=shape)
             
             self._update_metrics(sampled, x, labels, self.test_metrics, "test")
         
@@ -537,26 +639,17 @@ class DiffusionLightningModule(L.LightningModule):
             self.log_dict(metrics, prog_bar=True, sync_dist=True)
             self.test_metrics.reset()
         
-            # Log aggregated trajectory metrics if verbose test was enabled
         if self.verbose_test and self.trajectory_results:
             self._log_trajectory_summary()
     
     def _log_trajectory_summary(self):
-        """
-        Aggregate and log trajectory metrics across all test batches.
-        
-        Computes mean metrics at each timestep across batches.
-        """
+        """Aggregate and log trajectory metrics across all test batches."""
         if not self.trajectory_results:
             return
         
-        # Collect all trajectories
         all_trajectories = [r["trajectory"] for r in self.trajectory_results]
-        
-        # Find common timesteps (should be the same across batches)
         timesteps = [step["timestep"] for step in all_trajectories[0]]
         
-        # Aggregate metrics per timestep
         aggregated = {}
         for step_idx, t in enumerate(timesteps):
             step_metrics = {}
@@ -568,17 +661,15 @@ class DiffusionLightningModule(L.LightningModule):
                                 step_metrics[key] = []
                             step_metrics[key].append(value)
             
-            # Compute mean for each metric
             for key, values in step_metrics.items():
                 metric_key = f"traj_t{t}/{key}"
                 if metric_key not in aggregated:
                     aggregated[metric_key] = sum(values) / len(values)
         
-        # Log aggregated trajectory metrics
         if aggregated:
             self.log_dict(aggregated, sync_dist=True)
         
-        # Also log final timestep metrics prominently
+        # Log final timestep metrics prominently
         if all_trajectories and all_trajectories[0]:
             final_step = all_trajectories[0][-1]
             final_metrics = {}
@@ -596,19 +687,10 @@ class DiffusionLightningModule(L.LightningModule):
         shape: tuple,
         y: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """
-        Generate samples using reverse diffusion.
-        
-        Args:
-            batch_size: Number of samples to generate
-            shape: Shape of each sample (C, L)
-            y: Optional conditioning tensor
-            
-        Returns:
-            Generated samples
-        """
+        """Generate samples using reverse diffusion."""
+        model = self._get_primary_output_model()
         return self.diffusion.sample(
-            model=self.denoiser,
+            model=model,
             sample_size=batch_size,
             shape=shape,
             y=y,
@@ -623,27 +705,11 @@ class DiffusionLightningModule(L.LightningModule):
         save_every: int = 1,
         use_eval_diffusion: bool = True,
     ):
-        """
-        Generate samples and return the entire trajectory.
-        
-        Useful for:
-        - Visualizing the reverse process
-        - Analyzing intermediate quality
-        - Research and debugging
-        
-        Args:
-            batch_size: Number of samples to generate
-            shape: Shape of each sample (C, L)
-            y: Optional conditioning tensor
-            save_every: Save every N steps (1 = all steps)
-            use_eval_diffusion: Use eval_diffusion (DDIM) for speed
-            
-        Returns:
-            Tuple of (final_sample, trajectory) where trajectory is list of (timestep, x_t)
-        """
+        """Generate samples and return the entire trajectory."""
+        model = self._get_primary_output_model()
         diffusion = self.eval_diffusion if use_eval_diffusion else self.diffusion
         return diffusion.sample_with_trajectory(
-            model=self.denoiser,
+            model=model,
             sample_size=batch_size,
             shape=shape,
             y=y,
@@ -658,25 +724,12 @@ class DiffusionLightningModule(L.LightningModule):
         y: Optional[torch.Tensor] = None,
         use_eval_diffusion: bool = True,
     ):
-        """
-        Generator that yields (timestep, x_t) at each reverse diffusion step.
-        
-        Memory-efficient way to inspect the reverse process without storing
-        all intermediate states.
-        
-        Args:
-            batch_size: Number of samples to generate
-            shape: Shape of each sample (C, L)
-            y: Optional conditioning tensor
-            use_eval_diffusion: Use eval_diffusion (DDIM) for speed
-            
-        Yields:
-            Tuple of (timestep, x_t) at each step
-        """
+        """Generator that yields (timestep, x_t) at each reverse diffusion step."""
+        model = self._get_primary_output_model()
         diffusion = self.eval_diffusion if use_eval_diffusion else self.diffusion
         yield from diffusion.reverse_diffusion_generator(
-            model=self.denoiser,
-            batch_size=batch_size,
+            model=model,
+            sample_size=batch_size,
             shape=shape,
             y=y,
             denoiser_output=self.denoiser_output,
@@ -692,19 +745,6 @@ class DiffusionLightningModule(L.LightningModule):
     ) -> List[Dict[str, Any]]:
         """
         Evaluate metrics at every point along the reverse diffusion trajectory.
-        
-        This is useful for understanding how sample quality evolves during
-        the reverse process.
-        
-        Args:
-            ground_truth: Ground truth clean data (B, C, L)
-            labels: Ground truth class labels (B, L)
-            conditioning: Conditioning tensor (B, C, L)
-            metric_names: List of metric names to compute
-            save_every: Evaluate every N steps (1 = all steps)
-            
-        Returns:
-            List of dicts, each containing timestep and metrics at that step
         """
         if self.num_classes is None:
             raise ValueError("num_classes must be set to evaluate trajectory")
@@ -713,7 +753,6 @@ class DiffusionLightningModule(L.LightningModule):
         shape = (ground_truth.shape[1], ground_truth.shape[2])
         batch_size = ground_truth.shape[0]
         
-        # Create a fresh metric collection for trajectory evaluation
         metrics = create_metric_collection(
             metric_names,
             num_classes=self.num_classes,
@@ -730,13 +769,9 @@ class DiffusionLightningModule(L.LightningModule):
             if i % save_every != 0:
                 continue
             
-            # Reset metrics for this timestep
             metrics.reset()
-            
-            # Update metrics with current sample
             self._update_metrics(x_t, ground_truth, labels, metrics, "traj")
             
-            # Compute and store
             step_metrics = metrics.compute()
             results.append({
                 "timestep": t,
@@ -771,29 +806,9 @@ class DiffusionLightningModule(L.LightningModule):
     ):
         """
         Load model from checkpoint with a provided denoiser.
-        
-        This is useful when the denoiser architecture needs to be 
-        reconstructed externally (e.g., from config).
-        
-        Args:
-            checkpoint_path: Path to checkpoint file
-            denoiser: Pre-constructed denoiser module
-            map_location: Device to load checkpoint to
-            **kwargs: Additional kwargs passed to load_from_checkpoint
-            
-        Returns:
-            Loaded DiffusionLightningModule with denoiser weights restored
         """
-        # Load checkpoint
         checkpoint = torch.load(checkpoint_path, map_location=map_location)
-        
-        # Get hyperparameters
         hparams = checkpoint.get("hyper_parameters", {})
-        
-        # Create instance with provided denoiser
         model = cls(denoiser=denoiser, **hparams, **kwargs)
-        
-        # Load state dict
         model.load_state_dict(checkpoint["state_dict"])
-        
         return model
