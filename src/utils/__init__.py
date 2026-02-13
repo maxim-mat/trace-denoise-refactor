@@ -5,4 +5,5 @@ __all__ = [
     "Config", "DataConfig", "ModelConfig", "DiffusionConfig", "TrainerConfig",
     "OptimizerConfig", "CallbacksConfig", "LoggingConfig", "MetricsConfig",
     "create_metric_collection", "get_available_metrics", "METRIC_REGISTRY",
+    "discover_process", "get_petri_net_flow_matrix", 
 ]

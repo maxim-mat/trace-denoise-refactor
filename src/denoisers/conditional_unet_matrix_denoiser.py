@@ -25,7 +25,6 @@ class ConditionalUnetMatrixDenoiser(nn.Module):
     Args:
         in_ch: Number of input channels (num_classes)
         out_ch: Number of output channels (num_classes)
-        max_input_dim: Maximum sequence length
         transition_dim: Dimension of the transition matrix
         transition_matrix: Optional pre-defined transition matrix
         time_dim: Dimension of time embeddings
@@ -36,24 +35,22 @@ class ConditionalUnetMatrixDenoiser(nn.Module):
         self,
         in_ch,
         out_ch,
-        max_input_dim,
-        transition_dim,
-        transition_matrix=None,
+        flow_matrix_dim,
+        flow_matrix=None,
         time_dim=128,
         matrix_out_channels=1,
     ):
         super().__init__()
         self.time_dim = time_dim
         self.num_classes = in_ch
-        self.max_input_dim = max_input_dim
-        self.transition_dim = transition_dim
+        self.flow_matrix_dim = flow_matrix_dim
         
         # Learnable transition matrix if not provided
-        if transition_matrix is not None:
-            self.register_buffer('transition_matrix', transition_matrix)
+        if self.flow_matrix_dim is not None:
+            self.register_buffer('flow_matrix', self.flow_matrix_dim)
         else:
-            self.transition_matrix = nn.Parameter(
-                torch.randn(1, in_ch + 1, transition_dim, transition_dim)
+            self.flow_matrix = nn.Parameter(
+                torch.randn(1, in_ch + 1, self.flow_matrix_dim, self.flow_matrix_dim)
             )
 
         # Main sequence U-Net path
@@ -399,9 +396,9 @@ class ConditionalUnetMatrixDenoiser(nn.Module):
         """
         if use_matrix:
             if y is not None:
-                return self._forward_cond_mat(x, y, self.transition_matrix, t)
+                return self._forward_cond_mat(x, y, self.flow_matrix, t)
             else:
-                return self._forward_uncond_mat(x, self.transition_matrix, t)
+                return self._forward_uncond_mat(x, self.flow_matrix, t)
         else:
             if y is not None:
                 return self._forward_cond(x, y, t)

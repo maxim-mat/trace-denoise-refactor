@@ -15,12 +15,10 @@ class ConditionalUnetDenoiser(nn.Module):
         self,
         in_ch,
         out_ch,
-        max_input_dim,
         time_dim=128,
     ):
         super().__init__()
         self.time_dim = time_dim
-        self.max_input_dim = max_input_dim
 
         # Main path
         self.inc = DoubleConv(in_ch, 64)

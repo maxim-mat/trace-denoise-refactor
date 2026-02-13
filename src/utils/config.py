@@ -35,6 +35,7 @@ class DataConfig:
     batch_size: int = 32
     num_workers: int = 4
     pin_memory: bool = True
+    # if set , all traces will be padded to this length
     target_length: Optional[int] = None
 
 
@@ -43,8 +44,11 @@ class ModelConfig:
     """Model/denoiser configuration."""
     type: Literal["unet", "unet_matrix", "unet_graph"] = "unet"
     time_dim: int = 128
-    max_input_dim: int = MISSING  # Usually set from data
-
+    latent_matrix: bool = True
+    transition_dim: Optional[int] = 100  # shape of flow matrix
+    node_embedding_dim: Optional[int] = 128
+    graph_hidden_dim: Optional[int] = 128
+    pooling: Optional[Literal["mean", "max", "add"]] = None
 
 @dataclass
 class DiffusionConfig:
@@ -69,6 +73,14 @@ class DiffusionConfig:
     loss_type: Literal["mse", "l1", "cross_entropy"] = "cross_entropy"
     # Auxiliary losses for multi-output denoisers (empty list = no auxiliary losses)
     auxiliary_losses: List[AuxiliaryLossConfig] = field(default_factory=list)
+
+
+@dataclass
+class ProcessConfig:
+    """Process discovery configuration."""
+    method: Optional[Literal["inductive", "heuristic", "fuzzy"]] = None
+    remove_duplicates: bool = True
+    activity_names: Optional[list[str]] = None
 
 
 @dataclass
@@ -167,6 +179,7 @@ class Config:
     callbacks: CallbacksConfig = field(default_factory=CallbacksConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     metrics: MetricsConfig = field(default_factory=MetricsConfig)
+    process: ProcessConfig = field(default_factory=ProcessConfig)
     
     mode: Literal["train", "inference"] = "train"
     seed: int = 42

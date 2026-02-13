@@ -19,7 +19,6 @@ class ConditionalUnetGraphDenoiser(nn.Module):
     Args:
         in_ch: Number of input channels (num_classes)
         out_ch: Number of output channels (num_classes)
-        max_input_dim: Maximum sequence length
         num_nodes: Number of nodes in the graph
         graph_data: Graph structure data (edge_index, etc.)
         embedding_dim: Dimension of node embeddings
@@ -32,19 +31,17 @@ class ConditionalUnetGraphDenoiser(nn.Module):
         self,
         in_ch,
         out_ch,
-        max_input_dim,
-        num_nodes,
         graph_data,
-        embedding_dim,
-        hidden_dim,
+        embedding_dim=128,
+        hidden_dim=128,
         pooling=None,
         time_dim=128,
     ):
         super().__init__()
         self.time_dim = time_dim
-        self.max_input_dim = max_input_dim
         self.graph_data = graph_data
         self.gnn_pooling = pooling
+        self.num_nodes = self.graph_data.num_nodes
 
         # Main sequence U-Net path
         self.inc = DoubleConv(in_ch, 64)
@@ -87,19 +84,19 @@ class ConditionalUnetGraphDenoiser(nn.Module):
         self.sa6_cond = SelfAttention(64)
 
         # Graph encoders at different scales
-        self.genc1 = GraphEncoder(num_nodes, embedding_dim, hidden_dim, num_layers=1, output_dim=64, pooling=pooling)
-        self.genc2 = GraphEncoder(num_nodes, embedding_dim, hidden_dim, num_layers=2, output_dim=128, pooling=pooling)
-        self.genc3 = GraphEncoder(num_nodes, embedding_dim, hidden_dim, num_layers=3, output_dim=256, pooling=pooling)
-        self.genc4 = GraphEncoder(num_nodes, embedding_dim, hidden_dim, num_layers=3, output_dim=256, pooling=pooling)
-        self.genc5 = GraphEncoder(num_nodes, embedding_dim, hidden_dim, num_layers=2, output_dim=128, pooling=pooling)
-        self.genc6 = GraphEncoder(num_nodes, embedding_dim, hidden_dim, num_layers=1, output_dim=64, pooling=pooling)
+        self.genc1 = GraphEncoder(self.num_nodes, embedding_dim, hidden_dim, num_layers=1, output_dim=64, pooling=pooling)
+        self.genc2 = GraphEncoder(self.num_nodes, embedding_dim, hidden_dim, num_layers=2, output_dim=128, pooling=pooling)
+        self.genc3 = GraphEncoder(self.num_nodes, embedding_dim, hidden_dim, num_layers=3, output_dim=256, pooling=pooling)
+        self.genc4 = GraphEncoder(self.num_nodes, embedding_dim, hidden_dim, num_layers=3, output_dim=256, pooling=pooling)
+        self.genc5 = GraphEncoder(self.num_nodes, embedding_dim, hidden_dim, num_layers=2, output_dim=128, pooling=pooling)
+        self.genc6 = GraphEncoder(self.num_nodes, embedding_dim, hidden_dim, num_layers=1, output_dim=64, pooling=pooling)
 
-        self.genc1_cond = GraphEncoder(num_nodes, embedding_dim, hidden_dim, num_layers=1, output_dim=64, pooling=pooling)
-        self.genc2_cond = GraphEncoder(num_nodes, embedding_dim, hidden_dim, num_layers=2, output_dim=128, pooling=pooling)
-        self.genc3_cond = GraphEncoder(num_nodes, embedding_dim, hidden_dim, num_layers=3, output_dim=256, pooling=pooling)
-        self.genc4_cond = GraphEncoder(num_nodes, embedding_dim, hidden_dim, num_layers=3, output_dim=256, pooling=pooling)
-        self.genc5_cond = GraphEncoder(num_nodes, embedding_dim, hidden_dim, num_layers=2, output_dim=128, pooling=pooling)
-        self.genc6_cond = GraphEncoder(num_nodes, embedding_dim, hidden_dim, num_layers=1, output_dim=64, pooling=pooling)
+        self.genc1_cond = GraphEncoder(self.num_nodes, embedding_dim, hidden_dim, num_layers=1, output_dim=64, pooling=pooling)
+        self.genc2_cond = GraphEncoder(self.num_nodes, embedding_dim, hidden_dim, num_layers=2, output_dim=128, pooling=pooling)
+        self.genc3_cond = GraphEncoder(self.num_nodes, embedding_dim, hidden_dim, num_layers=3, output_dim=256, pooling=pooling)
+        self.genc4_cond = GraphEncoder(self.num_nodes, embedding_dim, hidden_dim, num_layers=3, output_dim=256, pooling=pooling)
+        self.genc5_cond = GraphEncoder(self.num_nodes, embedding_dim, hidden_dim, num_layers=2, output_dim=128, pooling=pooling)
+        self.genc6_cond = GraphEncoder(self.num_nodes, embedding_dim, hidden_dim, num_layers=1, output_dim=64, pooling=pooling)
 
         # Cross-attention layers for graph fusion (when not using pooling)
         if self.gnn_pooling is None:

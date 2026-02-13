@@ -5,7 +5,6 @@ import torch.nn.functional as F
 
 class DoubleConv(nn.Module):
     def __init__(self, in_ch, out_ch, mid_ch=None, residual=False):
-        # in ch start at 19 (number of features)
         super().__init__()
         mid_ch = out_ch if mid_ch is None else mid_ch
         self.residual = residual

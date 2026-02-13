@@ -9,7 +9,7 @@ from torch_geometric.data import HeteroData
 from torch_geometric.utils import from_networkx
 import torch_geometric
 import pm4py
-from utils.config import Config
+from src.utils.config import Config
 from pm4py.objects.petri_net.obj import PetriNet
 
 def get_onehot_features(graph: nx.Graph) -> Iterable:
@@ -22,7 +22,7 @@ def get_index_features(graph: nx.Graph) -> Iterable:
     return [[x] for x in reversed(np.arange(graph.number_of_nodes()))]
 
 
-def get_feature_collections(graph: nx.Graph, cfg: Config = None) -> Iterable[Iterable]:
+def get_feature_collections(graph: nx.Graph) -> Iterable[Iterable]:
     # n2v_features = get_node2vec_features(graph, cfg)
     index_features = get_index_features(graph)
     return [index_features]
@@ -41,9 +41,9 @@ def add_features_to_graph(graph: nx.Graph, feature_collections: Iterable[Iterabl
 
 
 def prepare_process_model_for_gnn(process_model: pm4py.PetriNet, init_marking: pm4py.Marking,
-                                  final_marking: pm4py.Marking, cfg: Config) -> torch_geometric.data.Data:
+                                  final_marking: pm4py.Marking) -> torch_geometric.data.Data:
     model_nx = pm4py.convert_petri_net_to_networkx(process_model, init_marking, final_marking)
-    feature_collections = get_feature_collections(model_nx, cfg)
+    feature_collections = get_feature_collections(model_nx)
     add_features_to_graph(model_nx, feature_collections)
     data = from_networkx(model_nx)
     return data
@@ -163,103 +163,3 @@ def prepare_process_model_for_heterognn(
 
     hetero = heterodata_from_petri_nx(model_nx)
     return hetero
-
-
-def prepare_process_model_for_gnn_ordered(process_model: pm4py.PetriNet, init_marking: pm4py.Marking,
-                                          final_marking: pm4py.Marking, cfg: Config) -> torch_geometric.data.Data:
-    model_nx = pm4py.convert_petri_net_to_networkx(process_model, init_marking, final_marking)
-    activity_nodes = {t.name for t in process_model.transitions if t.label is not None}
-    activity_ids = {v: int(k) for k, v in cfg.activity_names.items()}
-    node_index = max(activity_ids.items()) + 1
-    for node in model_nx.nodes(data=True):
-        if node[0] in activity_nodes:
-            node[1]['x'] = [activity_ids[node[0]]]
-    for node in model_nx.nodes(data=True):
-        if node[0] not in activity_nodes:
-            node[1]['x'] = [node_index]
-            node_index += 1
-    return from_networkx(model_nx)
-
-
-def get_process_model_reachability_graph_transition_matrix(process_model: pm4py.PetriNet, init_marking: pm4py.Marking):
-    rg = reachability_graph.construct_reachability_graph(process_model, init_marking)
-
-    rg_nx = nx.DiGraph()
-
-    for state in rg.states:
-        rg_nx.add_node(state.name)
-
-    transition_names = {tuple(s.strip(" '") for s in transition.name.strip("()").split(","))[1] for transition in
-                        rg.transitions}
-    transition_name_index = {name: idx for idx, name in enumerate(sorted(transition_names))}
-
-    for transition in rg.transitions:
-        transition_name = tuple(s.strip(" '") for s in transition.name.strip("()").split(","))
-        rg_nx.add_edge(
-            transition.from_state.name,
-            transition.to_state.name,
-            label=transition_name
-        )
-
-    nodes = sorted(rg_nx.nodes())
-    num_transitions = len(transition_names)
-    num_nodes = len(nodes)
-    transition_matrix = np.zeros((1, num_nodes, num_nodes), dtype=int)
-
-    for edge in rg_nx.edges(data=True):
-        from_node = nodes.index(edge[0])
-        to_node = nodes.index(edge[1])
-        transition_name = edge[2]['label'][1]
-        if transition_name in transition_name_index:
-            transition_idx = transition_name_index[transition_name]
-            transition_matrix[0, from_node, to_node] = 1
-        else:
-            raise RuntimeError(f"somehow, transition: {transition_name} was encountered but not indexed")
-
-    return rg_nx, transition_matrix
-
-
-def get_process_model_reachability_graph_transition_multimatrix(process_model: pm4py.PetriNet, init_marking: pm4py.Marking):
-    rg = reachability_graph.construct_reachability_graph(process_model, init_marking)
-
-    rg_nx = nx.MultiDiGraph()
-
-    for state in rg.states:
-        rg_nx.add_node(state.name)
-
-    transition_names = {tuple(s.strip(" '") for s in transition.name.strip("()").split(","))[1] for transition in
-                        rg.transitions}
-    transition_name_index = {name: idx for idx, name in enumerate(sorted(transition_names))}
-
-    for transition in rg.transitions:
-        transition_name = tuple(s.strip(" '") for s in transition.name.strip("()").split(","))
-        rg_nx.add_edge(
-            transition.from_state.name,
-            transition.to_state.name,
-            label=transition_name
-        )
-
-    nodes = sorted(rg_nx.nodes())
-    num_transitions = len(transition_names)
-    num_nodes = len(nodes)
-    transition_matrix = np.zeros((num_transitions, num_nodes, num_nodes), dtype=int)
-
-    for edge in rg_nx.edges(data=True):
-        from_node = nodes.index(edge[0])
-        to_node = nodes.index(edge[1])
-        transition_name = edge[2]['label'][1]
-        if transition_name in transition_name_index:
-            transition_idx = transition_name_index[transition_name]
-            transition_matrix[transition_idx, from_node, to_node] = 1
-        else:
-            raise RuntimeError(f"somehow, transition: {transition_name} was encountered but not indexed")
-
-    return rg_nx, transition_matrix
-
-
-def get_process_model_petri_net_transition_matrix(process_model: pm4py.PetriNet, init_marking: pm4py.Marking,
-                                                  final_marking: pm4py.Marking):
-    pn_nx = pm4py.convert_petri_net_to_networkx(process_model, init_marking, final_marking)
-    transition_matrix = nx.adjacency_matrix(pn_nx).todense()
-
-    return pn_nx, transition_matrix

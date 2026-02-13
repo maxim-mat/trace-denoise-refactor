@@ -173,23 +173,16 @@ def run_inference(cfg: Config):
     datamodule = _create_datamodule(cfg, labels, data)
     datamodule.setup()
     
-    max_input_dim = cfg.model.max_input_dim
-    if max_input_dim is None or max_input_dim == 0:
-        max_input_dim = datamodule.full_dataset.max_sequence_length
-        max_input_dim = ((max_input_dim + 7) // 8) * 8
-    
     # Load model
     model = load_model_from_checkpoint(
         checkpoint_path=str(checkpoint_path),
         cfg=cfg,
-        max_input_dim=max_input_dim,
         device=device,
     )
     
     logger.info(
-        "Dataset loaded: %d samples, max_seq_len=%d, num_classes=%d",
+        "Dataset loaded: %d samples, num_classes=%d",
         len(datamodule.full_dataset),
-        max_input_dim,
         cfg.data.num_classes,
     )
     

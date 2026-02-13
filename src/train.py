@@ -14,7 +14,7 @@ from lightning.pytorch.callbacks import (
 from lightning.pytorch.loggers import Logger, MLFlowLogger, TensorBoardLogger, WandbLogger
 
 from src.dataset import TracesDataModule
-from src.denoisers import ConditionalUnetDenoiser
+from src.denoisers import ConditionalUnetDenoiser, ConditionalUnetGraphDenoiser, ConditionalUnetMatrixDenoiser
 from src.diffusion import DiffusionLightningModule, DDPM, DDIM
 from src.utils.config import Config
 
@@ -37,6 +37,11 @@ def _load_data(cfg: Config):
 
 def _create_datamodule(cfg: Config, labels, data) -> TracesDataModule:
     """Create Lightning DataModule."""
+    get_flow_matrix = cfg.model.type == "unet_matrix"
+    get_graph_data = cfg.model.type == "unet_graph"
+    if (get_flow_matrix or get_graph_data) and cfg.process.method is None:
+        raise ValueError("Process discovery is required for flow matrix or graph data")
+    
     return TracesDataModule(
         labels=labels,
         data=data,
@@ -48,20 +53,45 @@ def _create_datamodule(cfg: Config, labels, data) -> TracesDataModule:
         pin_memory=cfg.data.pin_memory,
         target_length=cfg.data.target_length,
         seed=cfg.seed,
+        get_flow_matrix=get_flow_matrix,
+        get_graph_data=get_graph_data,
+        process_discovery_method=cfg.process.method,
+        remove_duplicates=cfg.process.remove_duplicates,
+        activity_names=cfg.process.activity_names,
     )
 
 
-def _create_denoiser(cfg: Config, max_input_dim: int):
+def _create_denoiser(cfg: Config, flow_matrix=None, graph_data=None):
     """Create denoiser model based on config."""
     if cfg.model.type == "unet":
         return ConditionalUnetDenoiser(
             in_ch=cfg.data.num_classes,
             out_ch=cfg.data.num_classes,
-            max_input_dim=max_input_dim,
             time_dim=cfg.model.time_dim,
         )
-    # TODO: Add unet_matrix and unet_graph when converted
-    raise ValueError(f"Unknown model type: {cfg.model.type}")
+    elif cfg.model.type == "unet_matrix":
+        if cfg.model.latent_matrix:
+            flow_matrix = None
+        return ConditionalUnetMatrixDenoiser(
+            in_ch=cfg.data.num_classes,
+            out_ch=cfg.data.num_classes,
+            time_dim=cfg.model.time_dim,
+            transition_dim=cfg.model.transition_dim,
+            flow_matrix=flow_matrix,
+            matrix_out_channels=cfg.model.matrix_out_channels,
+        )
+    elif cfg.model.type == "unet_graph":
+        return ConditionalUnetGraphDenoiser(
+            in_ch=cfg.data.num_classes,
+            out_ch=cfg.data.num_classes,
+            time_dim=cfg.model.time_dim,
+            graph_data=graph_data,
+            embedding_dim=cfg.model.node_embedding_dim,
+            hidden_dim=cfg.model.graph_hidden_dim,
+            pooling=cfg.model.pooling,
+        )
+    else:
+        raise ValueError(f"Unknown model type: {cfg.model.type}")
 
 
 def _create_diffusion(cfg: Config) -> Optional[DDPM | DDIM]:
@@ -186,7 +216,6 @@ def train(cfg: Config):
     # Seed everything for reproducibility
     L.seed_everything(cfg.seed, workers=True)
     
-    # Load data
     logger.info("Loading dataset from %s", cfg.data.path)
     labels, data = _load_data(cfg)
     
@@ -194,24 +223,16 @@ def train(cfg: Config):
     datamodule = _create_datamodule(cfg, labels, data)
     datamodule.setup()
     
-    # Get max sequence length from dataset
-    max_input_dim = cfg.model.max_input_dim
-    if max_input_dim is None or max_input_dim == 0:
-        max_input_dim = datamodule.full_dataset.max_sequence_length
-        # Round up to nearest power of 8 for efficient computation
-        max_input_dim = ((max_input_dim + 7) // 8) * 8
-    
     logger.info(
         "Dataset: train=%d, val=%d, test=%d, max_seq_len=%d, num_classes=%d",
         len(datamodule.train_dataset),
         len(datamodule.val_dataset),
         len(datamodule.test_dataset),
-        max_input_dim,
         cfg.data.num_classes,
     )
     
     # Create model components
-    denoiser = _create_denoiser(cfg, max_input_dim)
+    denoiser = _create_denoiser(cfg, datamodule.flow_matrix, datamodule.graph_data)
     diffusion = _create_diffusion(cfg)
     model = _create_model(cfg, denoiser, diffusion)
     
