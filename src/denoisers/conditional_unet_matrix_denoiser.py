@@ -37,6 +37,7 @@ class ConditionalUnetMatrixDenoiser(nn.Module):
         out_ch,
         flow_matrix_dim,
         flow_matrix=None,
+        latent_flow_matrix=True,
         time_dim=128,
         matrix_out_channels=1,
     ):
@@ -44,14 +45,19 @@ class ConditionalUnetMatrixDenoiser(nn.Module):
         self.time_dim = time_dim
         self.num_classes = in_ch
         self.flow_matrix_dim = flow_matrix_dim
+        self.latent_flow_matrix = latent_flow_matrix
         
-        # Learnable transition matrix if not provided
-        if self.flow_matrix_dim is not None:
-            self.register_buffer('flow_matrix', self.flow_matrix_dim)
+        # Learnable transition matrix if not enabled
+        if self.latent_flow_matrix is False:
+            self.flow_matrix = flow_matrix
+            self.register_buffer('flow_matrix', self.flow_matrix)
         else:
             self.flow_matrix = nn.Parameter(
                 torch.randn(1, in_ch + 1, self.flow_matrix_dim, self.flow_matrix_dim)
             )
+
+        self.gt_flow_matrix = flow_matrix
+        self.register_buffer('gt_flow_matrix', self.gt_flow_matrix)
 
         # Main sequence U-Net path
         self.inc = DoubleConv(in_ch, 64)
@@ -333,7 +339,7 @@ class ConditionalUnetMatrixDenoiser(nn.Module):
         x = self.up3(x, x1, t)
         x = self.sa6(x)
         x = self.outc(x)
-        return x
+        return x, None
 
     def _forward_cond(self, x, y, t):
         """Conditional forward without matrix."""
@@ -376,7 +382,7 @@ class ConditionalUnetMatrixDenoiser(nn.Module):
         x = self.sa6(x)
         x = self.outc(x + y)
 
-        return x
+        return x, None
 
     def forward(self, x, t, y=None, use_matrix=True):
         """

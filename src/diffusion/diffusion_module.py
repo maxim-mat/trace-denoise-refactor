@@ -6,8 +6,8 @@ from typing import Literal, Optional, Dict, Any, List, Tuple, Union
 from dataclasses import dataclass
 
 from .base_diffusion import BaseDiffusion
-from .ddpm import DDPM
-from .ddim import DDIM
+from src.modules.learnable_hybrid_loss import LearnableHybridLoss
+from src.modules.hybrid_loss import HybridLoss
 from src.utils.metrics import create_metric_collection
 
 
@@ -33,10 +33,11 @@ class DiffusionLightningModule(L.LightningModule):
         denoiser: nn.Module,
         diffusion: BaseDiffusion,
         eval_diffusion: BaseDiffusion,
-        noise_steps: int = 1000,
-        beta_start: float = 1e-4,
-        beta_end: float = 0.02,
-        learning_rate: float = 1e-4,
+        optimizer: Literal["adamw", "adam", "sgd"] = "adamw",
+        learning_rate: Optional[float] = 1e-4,
+        weight_decay: Optional[float] = 0.0,
+        scheduler: Literal["cosine", "step", "none"] = "cosine",
+        warmup_epochs: Optional[int] = 0,
         loss_type: Literal["mse", "l1", "cross_entropy", "hybrid"] = "cross_entropy",
         gamma: float = 1.0,
         denoiser_output: Literal["noise", "original"] = "original",
@@ -91,15 +92,19 @@ class DiffusionLightningModule(L.LightningModule):
             if hasattr(denoiser, 'max_input_dim'):
                 denoiser_config["max_input_dim"] = denoiser.max_input_dim
         
-        self.save_hyperparameters(ignore=['denoiser', 'diffusion'])
+        self.save_hyperparameters(ignore=['denoiser', 'diffusion', 'eval_diffusion'])
         
         self.denoiser = denoiser
-        self.noise_steps = noise_steps
-        self.beta_start = beta_start
-        self.beta_end = beta_end
+        self.optimizer = optimizer
+        self.diffusion = diffusion
+        self.eval_diffusion = eval_diffusion
         self.learning_rate = learning_rate
+        self.weight_decay = weight_decay
+        self.scheduler = scheduler
+        self.warmup_epochs = warmup_epochs
         self.denoiser_output = denoiser_output
         self.conditional_dropout = conditional_dropout
+        self.gamma = gamma
         self.loss_type = loss_type
         self.num_classes = num_classes
         self.verbose_test = verbose_test
@@ -107,12 +112,6 @@ class DiffusionLightningModule(L.LightningModule):
         self.trajectory_save_every = trajectory_save_every
         
         self.loss_fn = self._create_loss_fn(loss_type)
-        
-        self._diffusion = diffusion
-        self._eval_diffusion = eval_diffusion  # Separate diffusion for evaluation (DDIM)
-        
-        # Noise schedule parameters (registered as buffers for device handling)
-        self._setup_noise_schedule()
         
         # Setup metrics
         self._setup_metrics(
@@ -137,7 +136,9 @@ class DiffusionLightningModule(L.LightningModule):
         elif loss_type == "bce_logits":
             return nn.BCEWithLogitsLoss()
         elif loss_type == "hybrid":
-            return self.gamma * nn.CrossEntropyLoss() + (1 - self.gamma) * nn.BCEWithLogitsLoss()
+            return HybridLoss(nn.CrossEntropyLoss(), nn.BCEWithLogitsLoss(), self.gamma)
+        elif loss_type == "learnable_hybrid":
+            return LearnableHybridLoss(nn.CrossEntropyLoss(), nn.BCEWithLogitsLoss(), self.gamma)
         else:
             raise ValueError(f"Unknown loss type: {loss_type}")
     
@@ -164,28 +165,40 @@ class DiffusionLightningModule(L.LightningModule):
             )
 
     def configure_optimizers(self):
-        optimizer = torch.optim.AdamW(self.parameters(), lr=self.learning_rate)
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer,
-            T_max=self.trainer.max_epochs if self.trainer else 100,
-        )
+        if self.optimizer == "adamw":
+            optimizer = torch.optim.AdamW(self.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay)
+        elif self.optimizer == "adam":
+            optimizer = torch.optim.Adam(self.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay)
+        elif self.optimizer == "sgd":
+            optimizer = torch.optim.SGD(self.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay)
+        else:
+            raise ValueError(f"Unknown optimizer: {self.optimizer}")
+        
+        if self.scheduler == "cosine":
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer,
+                T_max=self.trainer.max_epochs if self.trainer else 100,
+                eta_min=0.01 * self.learning_rate,
+            )
+        elif self.scheduler == "step":
+            scheduler = torch.optim.lr_scheduler.StepLR(
+                optimizer,
+                step_size=50,
+            )
+        elif self.scheduler == "none":
+            return optimizer
+        else:
+            raise ValueError(f"Unknown scheduler: {self.scheduler}")
+        
         return {
             "optimizer": optimizer,
             "lr_scheduler": {
                 "scheduler": scheduler,
+                "monitor": "val_loss",
                 "interval": "epoch",
+                "frequency": 1,
             },
         }
-    
-    def _setup_noise_schedule(self):
-        """Set up noise schedule as buffers for automatic device placement."""
-        beta = torch.linspace(self.beta_start, self.beta_end, self.noise_steps)
-        alpha = 1.0 - beta
-        alpha_hat = torch.cumprod(alpha, dim=0)
-        
-        self.register_buffer('beta', beta)
-        self.register_buffer('alpha', alpha)
-        self.register_buffer('alpha_hat', alpha_hat)
     
     def enable_verbose_test(
         self,
@@ -226,7 +239,6 @@ class DiffusionLightningModule(L.LightningModule):
     def _update_metrics(
         self,
         sampled: torch.Tensor,
-        ground_truth: torch.Tensor,
         labels: torch.Tensor,
         metrics_collection,
         stage: str,
@@ -281,45 +293,31 @@ class DiffusionLightningModule(L.LightningModule):
         
         Expected batch format: (labels, data) where data is (B, L, C).
         """
-        labels, data = batch
-        x = data.permute(0, 2, 1).float()  # (B, C, L)
+        x, y = batch
+        x = x.permute(0, 2, 1).float()  # (B, C, L)
         
-        # Sample timesteps
-        t = self.sample_timesteps(x.shape[0])
+        t = self.diffusion.sample_timesteps(x.shape[0])
+        x_t, noise = self.diffusion.noise_data(x, t)
         
-        # Forward diffusion: add noise
-        x_t, noise = self.noise_data(x, t)
-        
-        # Apply conditional dropout
-        y = None
-        if self.conditional_dropout > 0 and torch.rand(1).item() < self.conditional_dropout:
+        if torch.rand(1).item() < self.conditional_dropout:
             y = None
-        else:
-            y = x
         
-        # Get target based on denoiser_output setting
         if self.denoiser_output == "noise":
             target = noise
         else:
             target = x
+
+        if self.loss_type in {"hybrid", "learnable_hybrid"}:
+            target = (target, self.denoiser.gt_flow_matrix)
         
-        # Predict and extract primary output
         denoiser_out = self.denoiser(x_t, t, y)
-        predicted, auxiliary_outputs = self._extract_primary_output(denoiser_out)
-        
-        # Compute primary loss
-        primary_loss = self.loss_fn(predicted, target)
-        
-        # Compute auxiliary loss based on config (not from denoiser)
-        auxiliary_loss = self._compute_auxiliary_loss(auxiliary_outputs, x, labels)
-        
-        # Total loss
-        loss = primary_loss + auxiliary_loss
+        loss = self.loss_fn(denoiser_out, target)
         
         self.log("train_loss", loss, prog_bar=True)
-        if self.auxiliary_loss_specs:
-            self.log("train_primary_loss", primary_loss, prog_bar=False)
-            self.log("train_auxiliary_loss", auxiliary_loss, prog_bar=False)
+        if self.loss_type == "hybrid":
+            self.log("mixture_ratio", self.gamma, prog_bar=False)
+        elif self.loss_type == "learnable_hybrid":
+            self.log("mixture_ratio", torch.sigmoid(self.gamma), prog_bar=False)
         
         return loss
     
@@ -342,12 +340,6 @@ class DiffusionLightningModule(L.LightningModule):
         )
         return total_norm
     
-    def _is_eval_epoch(self) -> bool:
-        """Check if current epoch should run full evaluation."""
-        if self.eval_every_n_epochs <= 0:
-            return False
-        return self.current_epoch % self.eval_every_n_epochs == 0
-    
     def validation_step(self, batch, batch_idx):
         """
         Validation step.
@@ -355,32 +347,40 @@ class DiffusionLightningModule(L.LightningModule):
         - Every epoch: Compute single-step loss (cheap, for monitoring)
         - Every N epochs: Run full reverse diffusion and compute metrics (expensive)
         """
-        labels, data = batch
-        x = data.permute(0, 2, 1).float()
+        x, y = batch
+        x = x.permute(0, 2, 1).float()  # (B, C, L)
         
-        # Compute single-step loss
-        t = self.sample_timesteps(x.shape[0])
-        x_t, noise = self.noise_data(x, t)
+        t = self.diffusion.sample_timesteps(x.shape[0])
+        x_t, noise = self.diffusion.noise_data(x, t)
         
-        denoiser_out = self.denoiser(x_t, t, x)
-        predicted, _ = self._extract_primary_output(denoiser_out)
+        if torch.rand(1).item() < self.conditional_dropout:
+            y = None
         
         if self.denoiser_output == "noise":
             target = noise
         else:
             target = x
+
+        if self.loss_type in {"hybrid", "learnable_hybrid"}:
+            target = (target, self.denoiser.gt_flow_matrix)
         
-        loss = self.loss_fn(predicted, target)
-        self.log("val_loss", loss, prog_bar=True, sync_dist=True)
+        denoiser_out = self.denoiser(x_t, t, y)
+        loss = self.loss_fn(denoiser_out, target)
         
+        self.log("train_loss", loss, prog_bar=True)
+        if self.loss_type == "hybrid":
+            self.log("mixture_ratio", self.gamma, prog_bar=False)
+        elif self.loss_type == "learnable_hybrid":
+            self.log("mixture_ratio", torch.sigmoid(self.gamma), prog_bar=False)
+
         # Run full reverse diffusion for metrics only on eval epochs
-        if self.val_metrics is not None and self._is_eval_epoch():
+        if self.val_metrics is not None:
             shape = (x.shape[1], x.shape[2])
             
             with torch.no_grad():
                 sampled = self._run_full_reverse_diffusion(conditioning=x, shape=shape)
             
-            self._update_metrics(sampled, x, labels, self.val_metrics, "val")
+            self._update_metrics(sampled, x, self.val_metrics, "val")
         
         return loss
     

@@ -28,7 +28,8 @@ class ModelConfig:
     conditional_dropout: Optional[float] = 0.2
     # Parameters for advanced denoisers
     latent_matrix: Optional[bool] = True
-    transition_dim: Optional[int] = 100  # shape of flow matrix
+    flow_matrix_dim: Optional[int] = 100  # shape of flow matrix
+    matrix_out_channels: Optional[int] = 1
     node_embedding_dim: Optional[int] = 128
     graph_hidden_dim: Optional[int] = 128
     pooling: Optional[str] = None  # "mean", "max", "add"
@@ -74,7 +75,7 @@ class TrainerConfig:
 class OptimizerConfig:
     """Optimizer configuration."""
     method: str = "adamw"  # "adam", "adamw", "sgd"
-    learning_rate: float = 1e-4
+    learning_rate: Optional[float] = 1e-4
     weight_decay: float = 0.0
     scheduler: str = "cosine"  # "cosine", "step", "none"
     warmup_epochs: Optional[int] = 0

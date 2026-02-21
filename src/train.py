@@ -70,14 +70,13 @@ def _create_denoiser(cfg: Config, flow_matrix=None, graph_data=None):
             time_dim=cfg.model.time_dim,
         )
     elif cfg.model.type == "unet_matrix":
-        if cfg.model.latent_matrix:
-            flow_matrix = None
         return ConditionalUnetMatrixDenoiser(
             in_ch=cfg.data.num_classes,
             out_ch=cfg.data.num_classes,
             time_dim=cfg.model.time_dim,
-            transition_dim=cfg.model.transition_dim,
+            transition_dim=cfg.model.flow_matrix_dim,
             flow_matrix=flow_matrix,
+            latent_flow_matrix=cfg.model.latent_matrix,
             matrix_out_channels=cfg.model.matrix_out_channels,
         )
     elif cfg.model.type == "unet_graph":
@@ -233,7 +232,7 @@ def train(cfg: Config):
     denoiser = _create_denoiser(cfg, datamodule.flow_matrix, datamodule.graph_data)
     diffusion = _create_diffusion(cfg.diffusion.sampler, cfg)
     eval_diffusion = _create_diffusion("ddim", cfg) if cfg.diffusion.eval_use_ddim else diffusion
-    model = _create_model(cfg, denoiser, diffusion)
+    model = _create_model(cfg, denoiser, diffusion, eval_diffusion)
     
     # Create logger
     exp_logger = _create_logger(cfg)
