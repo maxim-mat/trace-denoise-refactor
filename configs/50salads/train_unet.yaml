@@ -1,0 +1,75 @@
+# Training configuration for 50 Salads dataset with base unet denoiser
+# Usage: python main.py --config configs/train.yaml
+
+seed: 42
+
+data:
+  path: data/processed/50salads_dict.pkl
+  num_classes: 19
+  train_split: 0.7
+  val_split: 0.1
+  test_split: 0.2
+  batch_size: 5
+  num_workers: 4
+  pin_memory: true
+  # No target length, try dynamic padding
+
+model:
+  type: unet
+  loss_function: cross_entropy
+  time_dim: 128
+  conditional_dropout: 0.2
+  
+diffusion:
+  noise_steps: 1000
+  beta_start: 1e-4
+  beta_end: 0.02
+  sampler: ddpm
+  denoiser_output: original
+  eval_use_ddim: true
+  ddim_inference_steps: 50
+  ddim_eta: 0.0
+
+trainer:
+  max_epochs: 3000
+  accelerator: auto
+  devices: 1
+  precision: 32
+  gradient_clip_val: 1.0
+  accumulate_grad_batches: 1
+  val_check_interval: 0.2
+  log_every_n_steps: 50
+  deterministic: false
+
+optimizer:
+  method: adamw
+  learning_rate: 1e-5
+  weight_decay: 0.0
+  scheduler: "consine"
+
+callbacks:
+  early_stopping: true
+  early_stopping_patience: 10
+  early_stopping_monitor: val_loss
+  early_stopping_mode: min
+  save_top_k: 3
+  save_last: true
+
+logging:
+  logger: wandb
+  project_name: ddtr
+  experiment_name: initial_test
+  wandb_entity: ddtr
+  save_dir: outputs/50salads/unet
+
+metrics:
+  val:
+    - accuracy
+  test:
+    - accuracy
+    - precision
+    - recall
+    - f1
+    - safe_auroc
+    - wasserstein
+    

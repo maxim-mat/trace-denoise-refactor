@@ -1,5 +1,5 @@
 import torch
-from typing import List, Tuple, override
+from typing import List, Tuple
 from .base_diffusion import BaseDiffusion
 
 
@@ -10,16 +10,14 @@ class DDPM(BaseDiffusion):
     Uses all timesteps for reverse diffusion (slower but higher quality).
     """
     
-    def __init__(self, noise_steps=1000, beta_start=1e-4, beta_end=0.02, device="cuda"):
-        super().__init__(noise_steps, beta_start, beta_end, device)
+    def __init__(self, noise_steps=1000, beta_start=1e-4, beta_end=0.02):
+        super().__init__(noise_steps, beta_start, beta_end)
 
-    @override
     def get_timestep_pairs(self) -> List[Tuple[int, int]]:
         """Return all timestep pairs from T-1 down to 0."""
         # [(T-1, T-2), (T-2, T-3), ..., (1, 0)]
         return [(t, t - 1) for t in range(self.noise_steps - 1, 0, -1)]
 
-    @override
     def denoising_step(
         self,
         x_t: torch.Tensor,
@@ -38,8 +36,8 @@ class DDPM(BaseDiffusion):
         For denoiser_output='original':
             x_{t-1} = (√ᾱ_{t-1} * β_t)/(1-ᾱ_t) * x̂_0 + (√α_t * (1-ᾱ_{t-1}))/(1-ᾱ_t) * x_t + σ_t * z
         """
-        t_tensor = torch.full((batch_size,), t, device=self.device, dtype=torch.long)
-        t_prev_tensor = torch.full((batch_size,), t_prev, device=self.device, dtype=torch.long)
+        t_tensor = torch.full((batch_size,), t, dtype=torch.long)
+        t_prev_tensor = torch.full((batch_size,), t_prev, dtype=torch.long)
         
         alpha = self.alpha[t_tensor][:, None, None]
         alpha_hat = self.alpha_hat[t_tensor][:, None, None]

@@ -4,27 +4,6 @@ from omegaconf import MISSING
 
 
 @dataclass
-class AuxiliaryLossConfig:
-    """
-    Configuration for an auxiliary loss term.
-    
-    Used for multi-output denoisers like the matrix denoiser that return
-    additional outputs beyond the primary diffusion prediction.
-    
-    Example for matrix denoiser:
-        auxiliary_losses:
-          - output_index: 1          # m_hat is the 2nd output (index 1)
-            loss_type: bce_logits    # Binary cross-entropy with logits
-            weight: 0.5              # Weight relative to primary loss
-            target: labels           # Compare against batch labels
-    """
-    output_index: int = 1  # Index in auxiliary outputs tuple (1 = first auxiliary)
-    loss_type: Literal["mse", "l1", "bce", "bce_logits", "cross_entropy"] = "bce_logits"
-    weight: float = 1.0  # Weight relative to primary loss
-    target: Literal["ground_truth", "labels"] = "labels"  # What to compare against
-
-
-@dataclass
 class DataConfig:
     """Data configuration."""
     path: str = MISSING
@@ -34,7 +13,7 @@ class DataConfig:
     test_split: float = 0.1
     batch_size: int = 32
     num_workers: int = 4
-    pin_memory: bool = True
+    pin_memory: bool = False  # recommnded False for local, True for server
     # if set , all traces will be padded to this length
     target_length: Optional[int] = None
 
@@ -42,44 +21,38 @@ class DataConfig:
 @dataclass
 class ModelConfig:
     """Model/denoiser configuration."""
-    type: Literal["unet", "unet_matrix", "unet_graph"] = "unet"
+    type: str = "unet"  # "unet", "unet_matrix", "unet_graph"
+    loss_function: str = "cross_entropy"  # "mse", "l1", "cross_entropy", "hybrid"
+    gamma: Optional[float] = 1.0  # weight of main loss for hybrid loss
     time_dim: int = 128
-    latent_matrix: bool = True
+    conditional_dropout: Optional[float] = 0.2
+    # Parameters for advanced denoisers
+    latent_matrix: Optional[bool] = True
     transition_dim: Optional[int] = 100  # shape of flow matrix
     node_embedding_dim: Optional[int] = 128
     graph_hidden_dim: Optional[int] = 128
-    pooling: Optional[Literal["mean", "max", "add"]] = None
+    pooling: Optional[str] = None  # "mean", "max", "add"
+
 
 @dataclass
 class DiffusionConfig:
-    """
-    Diffusion process configuration.
-    
-    Loss computation:
-    - Primary loss: Applied to the first output of the denoiser (the diffusion prediction)
-    - Auxiliary losses: Applied to additional outputs (e.g., matrix prediction)
-    
-    The denoiser should return (primary, *auxiliaries) where primary is the noise/x0 prediction.
-    """
+    """Diffusion process configuration."""
     noise_steps: int = 1000
     beta_start: float = 1e-4
     beta_end: float = 0.02
-    sampler: Literal["ddpm", "ddim"] = "ddpm"
-    ddim_inference_steps: int = 50
-    ddim_eta: float = 0.0
-    denoiser_output: Literal["noise", "original"] = "original"
-    conditional_dropout: float = 0.0
-    # Primary loss (applied to first denoiser output vs noise/x0)
-    loss_type: Literal["mse", "l1", "cross_entropy"] = "cross_entropy"
-    # Auxiliary losses for multi-output denoisers (empty list = no auxiliary losses)
-    auxiliary_losses: List[AuxiliaryLossConfig] = field(default_factory=list)
+    sampler: str = "ddpm"  # "ddpm", "ddim"
+    denoiser_output: str = "original"  # "noise", "original"
+    eval_use_ddim: bool = False
+    # DDIM specific
+    ddim_inference_steps: Optional[int] = 50
+    ddim_eta: Optional[float] = 0.0
 
 
 @dataclass
 class ProcessConfig:
     """Process discovery configuration."""
-    method: Optional[Literal["inductive", "heuristic", "fuzzy"]] = None
-    remove_duplicates: bool = True
+    method: Optional[str] = None  # "inductive", "heuristic", "fuzzy"
+    remove_duplicates: Optional[bool] = True
     activity_names: Optional[list[str]] = None
 
 
@@ -89,7 +62,7 @@ class TrainerConfig:
     max_epochs: int = 100
     accelerator: str = "auto"
     devices: int = 1
-    precision: Literal["32", "16-mixed", "bf16-mixed"] = "32"
+    precision: str = "32"  # "32", "16-mixed", "bf16-mixed"
     gradient_clip_val: Optional[float] = 1.0
     accumulate_grad_batches: int = 1
     val_check_interval: float = 1.0
@@ -100,10 +73,11 @@ class TrainerConfig:
 @dataclass
 class OptimizerConfig:
     """Optimizer configuration."""
+    method: str = "adamw"  # "adam", "adamw", "sgd"
     learning_rate: float = 1e-4
     weight_decay: float = 0.0
-    scheduler: Literal["cosine", "step", "none"] = "cosine"
-    warmup_epochs: int = 0
+    scheduler: str = "cosine"  # "cosine", "step", "none"
+    warmup_epochs: Optional[int] = 0
 
 
 @dataclass
@@ -120,10 +94,10 @@ class CallbacksConfig:
 @dataclass
 class LoggingConfig:
     """Experiment logging configuration."""
-    logger: Literal["tensorboard", "mlflow", "wandb", "none"] = "tensorboard"
+    logger: str = "tensorboard"  # "tensorboard", "mlflow", "wandb", "none"
     project_name: str = "trace-denoise"
     experiment_name: Optional[str] = None
-    save_dir: str = "outputs"
+    save_dir: str = MISSING
     # MLflow specific
     mlflow_tracking_uri: Optional[str] = None
     # W&B specific
@@ -156,15 +130,7 @@ class MetricsConfig:
     val: List[str] = field(default_factory=lambda: ["accuracy", "precision", "recall", "f1", "safe_auroc"])
     # Metrics to compute during testing
     test: List[str] = field(default_factory=lambda: ["accuracy", "precision", "recall", "f1", "safe_auroc", "wasserstein"])
-    # Run full evaluation every N epochs (0 = never during training, only at test)
-    eval_every_n_epochs: int = 10
-    # Use DDIM for faster evaluation sampling (recommended)
-    eval_use_ddim: bool = True
-    # Number of DDIM steps for evaluation (fewer = faster but potentially lower quality)
-    eval_ddim_steps: int = 50
-    # Verbose trajectory evaluation during inference (analyze reverse diffusion at each step)
     verbose_trajectory: bool = False
-    # Evaluate trajectory metrics every N steps (1 = all steps, higher = faster)
     trajectory_save_every: int = 5
 
 
@@ -174,14 +140,13 @@ class Config:
     data: DataConfig = field(default_factory=DataConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     diffusion: DiffusionConfig = field(default_factory=DiffusionConfig)
+    process: Optional[ProcessConfig] = field(default_factory=ProcessConfig)
     trainer: TrainerConfig = field(default_factory=TrainerConfig)
     optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
     callbacks: CallbacksConfig = field(default_factory=CallbacksConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     metrics: MetricsConfig = field(default_factory=MetricsConfig)
-    process: ProcessConfig = field(default_factory=ProcessConfig)
     
-    mode: Literal["train", "inference"] = "train"
     seed: int = 42
     
     # Resume/checkpoint

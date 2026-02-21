@@ -14,13 +14,12 @@ class BaseDiffusion(ABC):
     The sampling loop and generator are implemented generically here.
     """
     
-    def __init__(self, noise_steps=1000, beta_start=1e-4, beta_end=0.02, device="cuda"):
+    def __init__(self, noise_steps=1000, beta_start=1e-4, beta_end=0.02):
         self.noise_steps = noise_steps
         self.beta_start = beta_start
         self.beta_end = beta_end
-        self.device = device
 
-        self.beta = self.prepare_noise_schedule().to(device)
+        self.beta = self.prepare_noise_schedule()
         self.alpha = 1. - self.beta
         self.alpha_hat = torch.cumprod(self.alpha, dim=0)
 

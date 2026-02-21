@@ -11,15 +11,6 @@ from .ddim import DDIM
 from src.utils.metrics import create_metric_collection
 
 
-@dataclass
-class AuxiliaryLossSpec:
-    """Runtime specification for an auxiliary loss (parsed from config)."""
-    output_index: int  # Index in auxiliary outputs tuple
-    loss_fn: nn.Module  # Loss function instance
-    weight: float  # Weight for this loss
-    target: str  # "ground_truth" or "labels"
-
-
 class DiffusionLightningModule(L.LightningModule):
     """
     Lightning module that wraps a denoiser with a diffusion process.
@@ -40,30 +31,25 @@ class DiffusionLightningModule(L.LightningModule):
     def __init__(
         self,
         denoiser: nn.Module,
-        diffusion: Optional[BaseDiffusion] = None,
+        diffusion: BaseDiffusion,
+        eval_diffusion: BaseDiffusion,
         noise_steps: int = 1000,
         beta_start: float = 1e-4,
         beta_end: float = 0.02,
         learning_rate: float = 1e-4,
-        loss_type: Literal["mse", "l1", "cross_entropy"] = "cross_entropy",
+        loss_type: Literal["mse", "l1", "cross_entropy", "hybrid"] = "cross_entropy",
+        gamma: float = 1.0,
         denoiser_output: Literal["noise", "original"] = "original",
         conditional_dropout: float = 0.0,
-        # Auxiliary losses for multi-output denoisers
-        auxiliary_losses: Optional[List[Dict[str, Any]]] = None,
-        # Denoiser config for checkpoint restoration
         denoiser_config: Optional[Dict[str, Any]] = None,
         # Metrics configuration
         num_classes: Optional[int] = None,
         val_metrics: Optional[List[str]] = None,
         test_metrics: Optional[List[str]] = None,
-        # Evaluation settings (full reverse diffusion is expensive)
-        eval_every_n_epochs: int = 10,  # Run full eval every N epochs (0 = never)
-        eval_use_ddim: bool = True,  # Use DDIM for faster evaluation
-        eval_ddim_steps: int = 50,  # Number of DDIM steps for evaluation
         # Verbose test mode (trajectory analysis during inference)
         verbose_test: bool = False,  # Enable trajectory evaluation during test
         trajectory_metrics: Optional[List[str]] = None,  # Metrics to compute along trajectory
-        trajectory_save_every: int = 1,  # Evaluate every N steps along trajectory
+        trajectory_save_every: int = 10,  # Evaluate every N steps along trajectory
     ):
         """
         Args:
@@ -116,33 +102,14 @@ class DiffusionLightningModule(L.LightningModule):
         self.conditional_dropout = conditional_dropout
         self.loss_type = loss_type
         self.num_classes = num_classes
-        self.eval_every_n_epochs = eval_every_n_epochs
-        self.eval_use_ddim = eval_use_ddim
-        self.eval_ddim_steps = eval_ddim_steps
         self.verbose_test = verbose_test
         self.trajectory_metrics = trajectory_metrics or ["accuracy"]
         self.trajectory_save_every = trajectory_save_every
         
-        # Storage for trajectory analysis results (populated during verbose test)
-        self.trajectory_results: List[Dict[str, Any]] = []
-        
-        # Set up primary loss function
         self.loss_fn = self._create_loss_fn(loss_type)
         
-        # Set up auxiliary losses for multi-output denoisers
-        self.auxiliary_loss_specs: List[AuxiliaryLossSpec] = []
-        if auxiliary_losses:
-            for aux_cfg in auxiliary_losses:
-                self.auxiliary_loss_specs.append(AuxiliaryLossSpec(
-                    output_index=aux_cfg.get("output_index", 1),
-                    loss_fn=self._create_loss_fn(aux_cfg.get("loss_type", "mse")),
-                    weight=aux_cfg.get("weight", 1.0),
-                    target=aux_cfg.get("target", "ground_truth"),
-                ))
-        
-        # Store diffusion process (will be initialized on first forward if None)
         self._diffusion = diffusion
-        self._eval_diffusion = None  # Separate diffusion for evaluation (DDIM)
+        self._eval_diffusion = eval_diffusion  # Separate diffusion for evaluation (DDIM)
         
         # Noise schedule parameters (registered as buffers for device handling)
         self._setup_noise_schedule()
@@ -153,6 +120,26 @@ class DiffusionLightningModule(L.LightningModule):
             val_metrics=val_metrics or [],
             test_metrics=test_metrics or [],
         )
+
+        # Storage for trajectory analysis results (populated during verbose test)
+        self.trajectory_results: List[Dict[str, Any]] = []
+
+    def _create_loss_fn(self, loss_type: str) -> nn.Module:
+        """Create a loss function from type string."""
+        if loss_type == "mse":
+            return nn.MSELoss()
+        elif loss_type == "l1":
+            return nn.L1Loss()
+        elif loss_type == "cross_entropy":
+            return nn.CrossEntropyLoss()
+        elif loss_type == "bce":
+            return nn.BCELoss()
+        elif loss_type == "bce_logits":
+            return nn.BCEWithLogitsLoss()
+        elif loss_type == "hybrid":
+            return self.gamma * nn.CrossEntropyLoss() + (1 - self.gamma) * nn.BCEWithLogitsLoss()
+        else:
+            raise ValueError(f"Unknown loss type: {loss_type}")
     
     def _setup_metrics(
         self,
@@ -175,6 +162,20 @@ class DiffusionLightningModule(L.LightningModule):
             self.test_metrics = create_metric_collection(
                 test_metrics, num_classes=num_classes, prefix="test/"
             )
+
+    def configure_optimizers(self):
+        optimizer = torch.optim.AdamW(self.parameters(), lr=self.learning_rate)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=self.trainer.max_epochs if self.trainer else 100,
+        )
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "interval": "epoch",
+            },
+        }
     
     def _setup_noise_schedule(self):
         """Set up noise schedule as buffers for automatic device placement."""
@@ -185,68 +186,6 @@ class DiffusionLightningModule(L.LightningModule):
         self.register_buffer('beta', beta)
         self.register_buffer('alpha', alpha)
         self.register_buffer('alpha_hat', alpha_hat)
-    
-    def _create_loss_fn(self, loss_type: str) -> nn.Module:
-        """Create a loss function from type string."""
-        if loss_type == "mse":
-            return nn.MSELoss()
-        elif loss_type == "l1":
-            return nn.L1Loss()
-        elif loss_type == "cross_entropy":
-            return nn.CrossEntropyLoss()
-        elif loss_type == "bce":
-            return nn.BCELoss()
-        elif loss_type == "bce_logits":
-            return nn.BCEWithLogitsLoss()
-        else:
-            raise ValueError(f"Unknown loss type: {loss_type}")
-    
-    @property
-    def diffusion(self) -> BaseDiffusion:
-        """Get diffusion process, creating default DDPM if not set."""
-        if self._diffusion is None:
-            self._diffusion = DDPM(
-                noise_steps=self.noise_steps,
-                beta_start=self.beta_start,
-                beta_end=self.beta_end,
-                device=self.device,
-            )
-        if hasattr(self._diffusion, 'device') and self._diffusion.device != self.device:
-            self._diffusion.device = self.device
-            self._diffusion.beta = self._diffusion.beta.to(self.device)
-            self._diffusion.alpha = self._diffusion.alpha.to(self.device)
-            self._diffusion.alpha_hat = self._diffusion.alpha_hat.to(self.device)
-        return self._diffusion
-    
-    @property
-    def eval_diffusion(self) -> BaseDiffusion:
-        """Get diffusion process for evaluation (DDIM for speed if configured)."""
-        if self._eval_diffusion is None:
-            if self.eval_use_ddim:
-                self._eval_diffusion = DDIM(
-                    noise_steps=self.noise_steps,
-                    inference_steps=self.eval_ddim_steps,
-                    eta=0.0,
-                    beta_start=self.beta_start,
-                    beta_end=self.beta_end,
-                    device=self.device,
-                )
-            else:
-                self._eval_diffusion = self.diffusion
-        if hasattr(self._eval_diffusion, 'device') and self._eval_diffusion.device != self.device:
-            self._eval_diffusion.device = self.device
-            self._eval_diffusion.beta = self._eval_diffusion.beta.to(self.device)
-            self._eval_diffusion.alpha = self._eval_diffusion.alpha.to(self.device)
-            self._eval_diffusion.alpha_hat = self._eval_diffusion.alpha_hat.to(self.device)
-        return self._eval_diffusion
-    
-    def set_diffusion(self, diffusion: BaseDiffusion):
-        """Set a different diffusion process (e.g., switch from DDPM to DDIM)."""
-        self._diffusion = diffusion
-    
-    def set_eval_diffusion(self, diffusion: BaseDiffusion):
-        """Set a different diffusion process for evaluation."""
-        self._eval_diffusion = diffusion
     
     def enable_verbose_test(
         self,
@@ -280,105 +219,9 @@ class DiffusionLightningModule(L.LightningModule):
         
         return pd.DataFrame(rows)
     
-    def sample_timesteps(self, batch_size: int) -> torch.Tensor:
-        """Sample random timesteps for training."""
-        return torch.randint(1, self.noise_steps, (batch_size,), device=self.device)
-    
-    def noise_data(self, x: torch.Tensor, t: torch.Tensor):
-        """
-        Forward diffusion - add noise to data.
-        
-        Args:
-            x: Clean data tensor (B, C, L)
-            t: Timesteps (B,)
-            
-        Returns:
-            Tuple of (noisy_x, noise)
-        """
-        sqrt_alpha_hat = torch.sqrt(self.alpha_hat[t])[:, None, None]
-        sqrt_one_minus_alpha_hat = torch.sqrt(1 - self.alpha_hat[t])[:, None, None]
-        eps = torch.randn_like(x)
-        x_t = sqrt_alpha_hat * x + sqrt_one_minus_alpha_hat * eps
-        return x_t, eps
-    
     def forward(self, x: torch.Tensor, t: torch.Tensor, y: Optional[torch.Tensor] = None):
         """Forward pass through denoiser."""
         return self.denoiser(x, t, y)
-    
-    def _extract_primary_output(
-        self,
-        denoiser_output: Union[torch.Tensor, Tuple[torch.Tensor, ...]]
-    ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, ...]]]:
-        """
-        Extract the primary output from denoiser prediction.
-        
-        Handles both single-tensor outputs and multi-output denoisers.
-        Convention: primary diffusion output is always first.
-        
-        Args:
-            denoiser_output: Either a tensor or a tuple (primary, *auxiliaries)
-            
-        Returns:
-            Tuple of (primary_output, auxiliary_outputs) where auxiliary_outputs
-            may be None for single-output denoisers.
-        """
-        if isinstance(denoiser_output, tuple):
-            return denoiser_output[0], denoiser_output[1:]
-        return denoiser_output, None
-    
-    def _compute_auxiliary_loss(
-        self,
-        auxiliary_outputs: Optional[Tuple[torch.Tensor, ...]],
-        ground_truth: torch.Tensor,
-        labels: torch.Tensor,
-    ) -> torch.Tensor:
-        """
-        Compute auxiliary losses based on configuration.
-        
-        Losses are configured via auxiliary_losses parameter, not in the denoiser.
-        This keeps denoisers as pure architectures.
-        
-        Args:
-            auxiliary_outputs: Tuple of auxiliary outputs from denoiser
-            ground_truth: The original clean data (x)
-            labels: Batch labels (for auxiliary outputs that compare against labels)
-            
-        Returns:
-            Total weighted auxiliary loss (0 if no auxiliary outputs or no configs)
-        """
-        if auxiliary_outputs is None or not self.auxiliary_loss_specs:
-            return torch.tensor(0.0, device=self.device)
-        
-        total_aux_loss = torch.tensor(0.0, device=self.device)
-        
-        for spec in self.auxiliary_loss_specs:
-            # Get the auxiliary output by index (1-indexed: 1 means first auxiliary)
-            aux_idx = spec.output_index - 1
-            if aux_idx < 0 or aux_idx >= len(auxiliary_outputs):
-                continue
-            
-            aux_output = auxiliary_outputs[aux_idx]
-            
-            # Determine target based on config
-            if spec.target == "ground_truth":
-                target = ground_truth
-            else:  # "labels"
-                # For matrix denoiser: labels may need to be broadcast to match output shape
-                target = labels
-                # Handle shape mismatch (e.g., matrix output shape differs from labels)
-                if aux_output.shape != target.shape:
-                    # Try to broadcast labels to match auxiliary output
-                    if aux_output.dim() == 4 and target.dim() <= 2:
-                        # Matrix case: aux_output is (B, C, H, W), labels might need expansion
-                        target = target.unsqueeze(1).expand_as(aux_output).float()
-                    elif aux_output.dim() == 4:
-                        target = target.expand_as(aux_output).float()
-            
-            # Compute weighted loss
-            aux_loss = spec.loss_fn(aux_output, target)
-            total_aux_loss = total_aux_loss + spec.weight * aux_loss
-        
-        return total_aux_loss
     
     def _update_metrics(
         self,
@@ -411,37 +254,6 @@ class DiffusionLightningModule(L.LightningModule):
                 metric.update(pred_classes, labels.long())
             else:
                 metric.update(pred_classes_flat, labels_flat)
-    
-    def _get_primary_output_model(self):
-        """
-        Get a wrapper around the denoiser that always returns primary output only.
-        
-        This is needed for sampling, where the diffusion process expects
-        a single tensor output from the model.
-        """
-        denoiser = self.denoiser
-        extract_fn = self._extract_primary_output
-        
-        class PrimaryOutputWrapper:
-            """Wrapper that extracts primary output from multi-output denoisers."""
-            def __init__(self, model, extract_primary):
-                self.model = model
-                self.extract_primary = extract_primary
-            
-            def __call__(self, x, t, y=None):
-                output = self.model(x, t, y)
-                primary, _ = self.extract_primary(output)
-                return primary
-            
-            def eval(self):
-                self.model.eval()
-                return self
-            
-            def train(self, mode=True):
-                self.model.train(mode)
-                return self
-        
-        return PrimaryOutputWrapper(denoiser, extract_fn)
     
     def _run_full_reverse_diffusion(
         self,
@@ -781,20 +593,6 @@ class DiffusionLightningModule(L.LightningModule):
             })
         
         return results
-    
-    def configure_optimizers(self):
-        optimizer = torch.optim.AdamW(self.parameters(), lr=self.learning_rate)
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer,
-            T_max=self.trainer.max_epochs if self.trainer else 100,
-        )
-        return {
-            "optimizer": optimizer,
-            "lr_scheduler": {
-                "scheduler": scheduler,
-                "interval": "epoch",
-            },
-        }
     
     @classmethod
     def load_from_checkpoint_with_denoiser(

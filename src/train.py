@@ -94,15 +94,15 @@ def _create_denoiser(cfg: Config, flow_matrix=None, graph_data=None):
         raise ValueError(f"Unknown model type: {cfg.model.type}")
 
 
-def _create_diffusion(cfg: Config) -> Optional[DDPM | DDIM]:
+def _create_diffusion(sampler, cfg: Config) -> Optional[DDPM | DDIM]:
     """Create diffusion process based on config."""
-    if cfg.diffusion.sampler == "ddpm":
+    if sampler == "ddpm":
         return DDPM(
             noise_steps=cfg.diffusion.noise_steps,
             beta_start=cfg.diffusion.beta_start,
             beta_end=cfg.diffusion.beta_end,
         )
-    elif cfg.diffusion.sampler == "ddim":
+    elif sampler == "ddim":
         return DDIM(
             noise_steps=cfg.diffusion.noise_steps,
             inference_steps=cfg.diffusion.ddim_inference_steps,
@@ -113,26 +113,24 @@ def _create_diffusion(cfg: Config) -> Optional[DDPM | DDIM]:
     return None
 
 
-def _create_model(cfg: Config, denoiser, diffusion) -> DiffusionLightningModule:
+def _create_model(cfg: Config, denoiser, diffusion, eval_diffusion) -> DiffusionLightningModule:
     """Create DiffusionLightningModule."""
     return DiffusionLightningModule(
         denoiser=denoiser,
         diffusion=diffusion,
+        eval_diffusion=eval_diffusion,
         noise_steps=cfg.diffusion.noise_steps,
         beta_start=cfg.diffusion.beta_start,
         beta_end=cfg.diffusion.beta_end,
         learning_rate=cfg.optimizer.learning_rate,
-        loss_type=cfg.diffusion.loss_type,
+        loss_type=cfg.model.loss_function,
+        gamma=cfg.model.gamma,
         denoiser_output=cfg.diffusion.denoiser_output,
-        conditional_dropout=cfg.diffusion.conditional_dropout,
+        conditional_dropout=cfg.model.conditional_dropout,
         # Metrics configuration (computed on full reverse diffusion samples)
         num_classes=cfg.data.num_classes,
         val_metrics=cfg.metrics.val,
         test_metrics=cfg.metrics.test,
-        # Evaluation settings
-        eval_every_n_epochs=cfg.metrics.eval_every_n_epochs,
-        eval_use_ddim=cfg.metrics.eval_use_ddim,
-        eval_ddim_steps=cfg.metrics.eval_ddim_steps,
     )
 
 
@@ -224,7 +222,7 @@ def train(cfg: Config):
     datamodule.setup()
     
     logger.info(
-        "Dataset: train=%d, val=%d, test=%d, max_seq_len=%d, num_classes=%d",
+        "Dataset: train=%d, val=%d, test=%d, num_classes=%d",
         len(datamodule.train_dataset),
         len(datamodule.val_dataset),
         len(datamodule.test_dataset),
@@ -233,7 +231,8 @@ def train(cfg: Config):
     
     # Create model components
     denoiser = _create_denoiser(cfg, datamodule.flow_matrix, datamodule.graph_data)
-    diffusion = _create_diffusion(cfg)
+    diffusion = _create_diffusion(cfg.diffusion.sampler, cfg)
+    eval_diffusion = _create_diffusion("ddim", cfg) if cfg.diffusion.eval_use_ddim else diffusion
     model = _create_model(cfg, denoiser, diffusion)
     
     # Create logger

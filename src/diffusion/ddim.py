@@ -1,5 +1,5 @@
 import torch
-from typing import List, Tuple, override
+from typing import List, Tuple
 from .base_diffusion import BaseDiffusion
 
 
@@ -18,9 +18,8 @@ class DDIM(BaseDiffusion):
         eta=0.0,
         beta_start=1e-4,
         beta_end=0.02,
-        device="cuda",
     ):
-        super().__init__(noise_steps, beta_start, beta_end, device)
+        super().__init__(noise_steps, beta_start, beta_end)
         self.inference_steps = inference_steps
         self.eta = eta
         
@@ -31,7 +30,6 @@ class DDIM(BaseDiffusion):
             self.timesteps.append(self.noise_steps - 1)
         self.timesteps = sorted(self.timesteps, reverse=True)  # Descending order
 
-    @override
     def get_timestep_pairs(self) -> List[Tuple[int, int]]:
         """Return subsampled timestep pairs."""
         # Pair each timestep with the next one (going backwards)
@@ -43,7 +41,6 @@ class DDIM(BaseDiffusion):
             pairs.append((self.timesteps[-1], 0))
         return pairs
 
-    @override
     def denoising_step(
         self,
         x_t: torch.Tensor,
@@ -60,8 +57,8 @@ class DDIM(BaseDiffusion):
         
         where σ² = η² * (1-ᾱ_{t-1})/(1-ᾱ_t) * (1 - ᾱ_t/ᾱ_{t-1})
         """
-        t_tensor = torch.full((batch_size,), t, device=self.device, dtype=torch.long)
-        t_prev_tensor = torch.full((batch_size,), max(t_prev, 0), device=self.device, dtype=torch.long)
+        t_tensor = torch.full((batch_size,), t, dtype=torch.long)
+        t_prev_tensor = torch.full((batch_size,), max(t_prev, 0), dtype=torch.long)
         
         alpha_hat = self.alpha_hat[t_tensor][:, None, None]
         alpha_hat_prev = self.alpha_hat[t_prev_tensor][:, None, None] if t_prev > 0 else torch.ones_like(alpha_hat)

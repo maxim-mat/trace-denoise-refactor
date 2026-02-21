@@ -75,6 +75,9 @@ def parse_args():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--train", action="store_true", help="Train the model")
+    group.add_argument("--inference", action="store_true", help="Run inference")
     parser.add_argument(
         "--config", "-c",
         required=True,
@@ -96,16 +99,12 @@ def main():
     logger.info("Loading config from: %s", args.config)
     cfg = load_config(args.config, args.overrides)
     
-    logger.info("Mode: %s", cfg.mode)
     logger.info("Config:\n%s", OmegaConf.to_yaml(OmegaConf.structured(cfg)))
     
-    if cfg.mode == "train":
+    if args.train:
         train(cfg)
-    elif cfg.mode == "inference":
-        run_inference(cfg)
     else:
-        raise ValueError(f"Unknown mode: {cfg.mode}")
-
+        run_inference(cfg)
 
 if __name__ == "__main__":
     main()
