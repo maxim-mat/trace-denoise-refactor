@@ -38,11 +38,12 @@ class DiffusionLightningModule(L.LightningModule):
         weight_decay: Optional[float] = 0.0,
         scheduler: Literal["cosine", "step", "none"] = "cosine",
         warmup_epochs: Optional[int] = 0,
-        loss_type: Literal["mse", "l1", "cross_entropy", "hybrid"] = "cross_entropy",
+        loss_type: Literal["mse", "l1", "cross_entropy", "hybrid", "learnable_hybrid"] = "cross_entropy",
         gamma: float = 1.0,
         denoiser_output: Literal["noise", "original"] = "original",
         conditional_dropout: float = 0.0,
         denoiser_config: Optional[Dict[str, Any]] = None,
+        padding_value: Optional[int] = None,
         # Metrics configuration
         num_classes: Optional[int] = None,
         val_metrics: Optional[List[str]] = None,
@@ -112,6 +113,7 @@ class DiffusionLightningModule(L.LightningModule):
         self.trajectory_save_every = trajectory_save_every
         
         self.loss_fn = self._create_loss_fn(loss_type)
+        self.padding_value = padding_value
         
         # Setup metrics
         self._setup_metrics(
@@ -131,10 +133,6 @@ class DiffusionLightningModule(L.LightningModule):
             return nn.L1Loss()
         elif loss_type == "cross_entropy":
             return nn.CrossEntropyLoss()
-        elif loss_type == "bce":
-            return nn.BCELoss()
-        elif loss_type == "bce_logits":
-            return nn.BCEWithLogitsLoss()
         elif loss_type == "hybrid":
             return HybridLoss(nn.CrossEntropyLoss(), nn.BCEWithLogitsLoss(), self.gamma)
         elif loss_type == "learnable_hybrid":
@@ -311,8 +309,10 @@ class DiffusionLightningModule(L.LightningModule):
             target = (target, self.denoiser.gt_flow_matrix)
         
         denoiser_out = self.denoiser(x_t, t, y)
-        loss = self.loss_fn(denoiser_out, target)
-        
+        if self.loss_type in {"cross_entropy", "hybrid", "learnable_hybrid"}:
+            loss = self.loss_fn(denoiser_out, target, ignore_index=self.padding_value)
+        else:
+            loss = self.loss_fn(denoiser_out, target)
         self.log("train_loss", loss, prog_bar=True)
         if self.loss_type == "hybrid":
             self.log("mixture_ratio", self.gamma, prog_bar=False)
@@ -365,7 +365,10 @@ class DiffusionLightningModule(L.LightningModule):
             target = (target, self.denoiser.gt_flow_matrix)
         
         denoiser_out = self.denoiser(x_t, t, y)
-        loss = self.loss_fn(denoiser_out, target)
+        if self.loss_type in {"cross_entropy", "hybrid", "learnable_hybrid"}:
+            loss = self.loss_fn(denoiser_out, target, ignore_index=self.padding_value)
+        else:
+            loss = self.loss_fn(denoiser_out, target)
         
         self.log("train_loss", loss, prog_bar=True)
         if self.loss_type == "hybrid":
@@ -398,23 +401,10 @@ class DiffusionLightningModule(L.LightningModule):
         When verbose_test is enabled, also evaluates metrics at each point
         along the reverse diffusion trajectory for analysis.
         """
-        labels, data = batch
-        x = data.permute(0, 2, 1).float()
+        x, y = batch
+        x = x.permute(0, 2, 1).float()  # (B, C, L)
         
-        # Compute single-step loss
-        t = self.sample_timesteps(x.shape[0])
-        x_t, noise = self.noise_data(x, t)
-        
-        denoiser_out = self.denoiser(x_t, t, x)
-        predicted, _ = self._extract_primary_output(denoiser_out)
-        
-        if self.denoiser_output == "noise":
-            target = noise
-        else:
-            target = x
-        
-        loss = self.loss_fn(predicted, target)
-        self.log("test_loss", loss, prog_bar=True, sync_dist=True)
+        x_pred = self.eval_diffusion.sample(self.denosier, x.shape[0], (x.shape[1], x.shape[2]), y, self.denoiser_output)
         
         # Verbose test: evaluate entire trajectory
         if self.verbose_test and self.num_classes is not None:

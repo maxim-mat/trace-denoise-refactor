@@ -11,6 +11,7 @@ class DataConfig:
     train_split: float = 0.8
     val_split: float = 0.1
     test_split: float = 0.1
+    padding_value: int = 0
     batch_size: int = 32
     num_workers: int = 4
     pin_memory: bool = False  # recommnded False for local, True for server
