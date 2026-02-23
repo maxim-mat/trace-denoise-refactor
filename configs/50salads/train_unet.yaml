@@ -57,20 +57,21 @@ callbacks:
   save_last: true
 
 logging:
-  logger: wandb
-  project_name: ddtr
+  loggers:
+    - wandb
+  project_name: DDTR
   experiment_name: initial_test
-  wandb_entity: ddtr
-  save_dir: outputs/50salads/unet
+  run_name: initial_run
+  version: 0.0.1
+  wandb_entity: maxim0
+  save_dir: ./outputs
 
 metrics:
-  val:
-    - accuracy
   test:
     - accuracy
     - precision
     - recall
     - f1
-    - safe_auroc
     - wasserstein
+    - auroc
     

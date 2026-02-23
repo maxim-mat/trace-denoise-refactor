@@ -48,9 +48,10 @@ callbacks:
   save_last: true
 
 logging:
-  logger: wandb
-  project_name: trace-denoise
+  loggers:
+    - wandb
+  project_name: DDTR
   experiment_name: null
   save_dir: outputs
-  wandb_entity: null  # Set your W&B entity/team name
+  wandb_entity: maxim0  # Set your W&B entity/team name
   wandb_offline: false

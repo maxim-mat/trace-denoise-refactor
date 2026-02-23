@@ -11,6 +11,7 @@ import torch
 import torch.nn.functional as F
 from typing import Dict, List, Optional, Literal, Any, Callable
 from dataclasses import dataclass, field
+from scipy.stats import wasserstein_distance
 
 import torchmetrics
 from torchmetrics import MetricCollection
@@ -88,114 +89,59 @@ def create_confusion_matrix(num_classes: int, **kwargs) -> torchmetrics.Metric:
 
 class WassersteinDistance(torchmetrics.Metric):
     """
-    Compute mean Wasserstein-1 distance between predicted and target sequences.
-    
-    This measures how different the predicted class distribution is from
-    the target across the sequence dimension.
+    Computes the mean Wasserstein-1 distance between predicted probability 
+    distributions and deterministic targets across the sequence dimension.
     """
-    
     full_state_update: bool = False
-    
-    def __init__(self, **kwargs):
+
+    def __init__(self, num_classes: int, ignore_index: Optional[int] = None, **kwargs):
         super().__init__(**kwargs)
+        self.num_classes = num_classes
+        self.ignore_index = ignore_index
+        
+        # Metric states for global reduction across multiple GPUs
         self.add_state("total_distance", default=torch.tensor(0.0), dist_reduce_fx="sum")
         self.add_state("total_samples", default=torch.tensor(0), dist_reduce_fx="sum")
-    
-    def update(self, preds: torch.Tensor, target: torch.Tensor):
+
+    def update(self, logits: torch.Tensor, target: torch.Tensor):
         """
         Args:
-            preds: Predicted class indices (B, L)
-            target: Target class indices (B, L)
+            logits: Predicted raw outputs of shape (B, C, L)
+            target: Ground truth class indices of shape (B, L)
         """
-        # Compute per-sample Wasserstein distance
-        # Using the 1D discrete case: sum of |CDF_pred - CDF_target|
-        batch_size = preds.shape[0]
-        
-        for i in range(batch_size):
-            pred_seq = preds[i].float()
-            target_seq = target[i].float()
-            
-            # Sort both sequences
-            pred_sorted = torch.sort(pred_seq)[0]
-            target_sorted = torch.sort(target_seq)[0]
-            
-            # Wasserstein-1 distance for 1D distributions
-            distance = torch.mean(torch.abs(pred_sorted - target_sorted))
-            self.total_distance += distance
-        
-        self.total_samples += batch_size
-    
+        # 1. Convert logits to probabilities and then to CDF
+        # We move to (B, L, C) for easier alignment with target one-hot
+        probs = torch.softmax(logits, dim=1).permute(0, 2, 1)
+        pred_cdf = torch.cumsum(probs, dim=-1)
+
+        # 2. Convert integer targets to one-hot, then to CDF
+        target_one_hot = torch.nn.functional.one_hot(
+            target, num_classes=self.num_classes
+        ).float()
+        target_cdf = torch.cumsum(target_one_hot, dim=-1)
+
+        # 3. Compute L1 distance between CDFs
+        # Summing over the class dimension gives W1 per (batch, step)
+        w1_per_step = torch.sum(torch.abs(pred_cdf - target_cdf), dim=-1)
+
+        # 4. Handle Masking and State Updates
+        if self.ignore_index is not None:
+            mask = target != self.ignore_index
+            # Only sum distances for non-padded elements
+            self.total_distance += w1_per_step[mask].sum()
+            self.total_samples += mask.sum()
+        else:
+            self.total_distance += w1_per_step.sum()
+            self.total_samples += target.numel()
+
     def compute(self) -> torch.Tensor:
+        # Final global mean calculation
         return self.total_distance / self.total_samples.clamp(min=1)
 
 
 @register_metric("wasserstein")
-def create_wasserstein(**kwargs) -> torchmetrics.Metric:
-    return WassersteinDistance()
-
-
-class SafeAUROC(torchmetrics.Metric):
-    """
-    AUROC that gracefully handles batches with missing classes.
-    
-    Instead of failing, it returns -1 when AUROC cannot be computed
-    and logs a warning.
-    """
-    
-    full_state_update: bool = False
-    
-    def __init__(self, num_classes: int, average: str = "macro", **kwargs):
-        super().__init__(**kwargs)
-        self.num_classes = num_classes
-        self.average = average
-        self.add_state("preds", default=[], dist_reduce_fx="cat")
-        self.add_state("targets", default=[], dist_reduce_fx="cat")
-    
-    def update(self, preds: torch.Tensor, target: torch.Tensor):
-        """
-        Args:
-            preds: Predicted probabilities (B*L, C) or logits
-            target: Target class indices (B*L,)
-        """
-        # Store predictions and targets for epoch-end computation
-        if preds.dim() > 1:
-            preds = F.softmax(preds, dim=-1)
-        self.preds.append(preds)
-        self.targets.append(target)
-    
-    def compute(self) -> torch.Tensor:
-        if len(self.preds) == 0:
-            return torch.tensor(-1.0, device=self.device)
-        
-        preds = torch.cat(self.preds, dim=0)
-        targets = torch.cat(self.targets, dim=0)
-        
-        # Check if all classes are present
-        unique_classes = torch.unique(targets)
-        if len(unique_classes) < self.num_classes:
-            # Not all classes present - AUROC may be unreliable
-            # Try to compute anyway, return -1 on failure
-            try:
-                auroc = MulticlassAUROC(
-                    num_classes=self.num_classes,
-                    average=self.average,
-                    thresholds=None,
-                ).to(preds.device)
-                return auroc(preds, targets)
-            except (ValueError, RuntimeError):
-                return torch.tensor(-1.0, device=self.device)
-        
-        auroc = MulticlassAUROC(
-            num_classes=self.num_classes,
-            average=self.average,
-            thresholds=None,
-        ).to(preds.device)
-        return auroc(preds, targets)
-
-
-@register_metric("safe_auroc")
-def create_safe_auroc(num_classes: int, **kwargs) -> torchmetrics.Metric:
-    return SafeAUROC(num_classes=num_classes, average="macro")
+def create_wasserstein(ignore_index: Optional[int] = None, **kwargs) -> torchmetrics.Metric:
+    return WassersteinDistance(ignore_index=ignore_index)
 
 
 def create_metric_collection(

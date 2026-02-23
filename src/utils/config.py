@@ -87,7 +87,7 @@ class CallbacksConfig:
     """Callbacks configuration."""
     early_stopping: bool = True
     early_stopping_patience: int = 10
-    early_stopping_monitor: str = "val_loss"
+    early_stopping_monitor: Optional[str] = None
     early_stopping_mode: str = "min"
     save_top_k: int = 3
     save_last: bool = True
@@ -96,14 +96,17 @@ class CallbacksConfig:
 @dataclass
 class LoggingConfig:
     """Experiment logging configuration."""
-    logger: str = "tensorboard"  # "tensorboard", "mlflow", "wandb", "none"
+    loggers: List[str] = field(default_factory=lambda: ["tensorboard"])  # any combo of "tensorboard", "mlflow", "wandb"
     project_name: str = "trace-denoise"
     experiment_name: Optional[str] = None
+    run_name: Optional[str] = None
+    version: Optional[str] = None
     save_dir: str = MISSING
     # MLflow specific
     mlflow_tracking_uri: Optional[str] = None
     # W&B specific
     wandb_entity: Optional[str] = None
+    wandb_project: Optional[str] = None
     wandb_offline: bool = False
 
 

@@ -150,16 +150,13 @@ class DiffusionLightningModule(L.LightningModule):
         self.val_metrics = None
         self.test_metrics = None
         
-        if num_classes is None or num_classes <= 0:
-            return
-        
         if val_metrics:
             self.val_metrics = create_metric_collection(
-                val_metrics, num_classes=num_classes, prefix="val/"
+                val_metrics, num_classes=num_classes, prefix="val/", ignore_index=self.padding_value
             )
         if test_metrics:
             self.test_metrics = create_metric_collection(
-                test_metrics, num_classes=num_classes, prefix="test/"
+                test_metrics, num_classes=num_classes, prefix="test/", ignore_index=self.padding_value
             )
 
     def configure_optimizers(self):
@@ -233,54 +230,6 @@ class DiffusionLightningModule(L.LightningModule):
     def forward(self, x: torch.Tensor, t: torch.Tensor, y: Optional[torch.Tensor] = None):
         """Forward pass through denoiser."""
         return self.denoiser(x, t, y)
-    
-    def _update_metrics(
-        self,
-        sampled: torch.Tensor,
-        labels: torch.Tensor,
-        metrics_collection,
-        stage: str,
-    ):
-        """Update metrics based on full reverse diffusion samples vs ground truth."""
-        if metrics_collection is None:
-            return
-        
-        # Get predictions as class probabilities and indices
-        pred_probs = F.softmax(sampled, dim=1)  # (B, C, L)
-        pred_classes = torch.argmax(pred_probs, dim=1)  # (B, L)
-        
-        # Flatten for metrics: (B*L, C) and (B*L,)
-        batch_size, num_classes, seq_len = sampled.shape
-        pred_probs_flat = pred_probs.permute(0, 2, 1).reshape(-1, num_classes)
-        pred_classes_flat = pred_classes.reshape(-1)
-        labels_flat = labels.reshape(-1).long()
-        
-        # Update metrics
-        for name, metric in metrics_collection.items():
-            metric_name = name.replace(f"{stage}/", "")
-            if metric_name in ["auroc", "safe_auroc", "auroc_weighted"]:
-                metric.update(pred_probs_flat, labels_flat)
-            elif metric_name == "wasserstein":
-                metric.update(pred_classes, labels.long())
-            else:
-                metric.update(pred_classes_flat, labels_flat)
-    
-    def _run_full_reverse_diffusion(
-        self,
-        conditioning: torch.Tensor,
-        shape: tuple,
-    ) -> torch.Tensor:
-        """Run full reverse diffusion process for evaluation."""
-        batch_size = conditioning.shape[0]
-        model = self._get_primary_output_model()
-        
-        return self.eval_diffusion.sample(
-            model=model,
-            sample_size=batch_size,
-            shape=shape,
-            y=conditioning,
-            denoiser_output=self.denoiser_output,
-        )
 
     def training_step(self, batch, batch_idx):
         """
@@ -313,7 +262,7 @@ class DiffusionLightningModule(L.LightningModule):
             loss = self.loss_fn(denoiser_out, target, ignore_index=self.padding_value)
         else:
             loss = self.loss_fn(denoiser_out, target)
-        self.log("train_loss", loss, prog_bar=True)
+        self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True)
         if self.loss_type == "hybrid":
             self.log("mixture_ratio", self.gamma, prog_bar=False)
         elif self.loss_type == "learnable_hybrid":
@@ -370,29 +319,9 @@ class DiffusionLightningModule(L.LightningModule):
         else:
             loss = self.loss_fn(denoiser_out, target)
         
-        self.log("train_loss", loss, prog_bar=True)
-        if self.loss_type == "hybrid":
-            self.log("mixture_ratio", self.gamma, prog_bar=False)
-        elif self.loss_type == "learnable_hybrid":
-            self.log("mixture_ratio", torch.sigmoid(self.gamma), prog_bar=False)
-
-        # Run full reverse diffusion for metrics only on eval epochs
-        if self.val_metrics is not None:
-            shape = (x.shape[1], x.shape[2])
-            
-            with torch.no_grad():
-                sampled = self._run_full_reverse_diffusion(conditioning=x, shape=shape)
-            
-            self._update_metrics(sampled, x, self.val_metrics, "val")
+        self.log("val/loss", loss, on_step=True, on_epoch=True, prog_bar=True)
         
         return loss
-    
-    def on_validation_epoch_end(self):
-        """Log validation metrics at epoch end (only on eval epochs)."""
-        if self.val_metrics is not None and self._is_eval_epoch():
-            metrics = self.val_metrics.compute()
-            self.log_dict(metrics, prog_bar=True, sync_dist=True)
-            self.val_metrics.reset()
     
     def test_step(self, batch, batch_idx):
         """
@@ -405,34 +334,13 @@ class DiffusionLightningModule(L.LightningModule):
         x = x.permute(0, 2, 1).float()  # (B, C, L)
         
         x_pred = self.eval_diffusion.sample(self.denosier, x.shape[0], (x.shape[1], x.shape[2]), y, self.denoiser_output)
-        
-        # Verbose test: evaluate entire trajectory
-        if self.verbose_test and self.num_classes is not None:
-            batch_trajectory = self.evaluate_trajectory(
-                ground_truth=x,
-                labels=labels,
-                conditioning=x,
-                metric_names=self.trajectory_metrics,
-                save_every=self.trajectory_save_every,
-            )
-            self.trajectory_results.append({
-                "batch_idx": batch_idx,
-                "trajectory": batch_trajectory,
-            })
-        # Standard test: just final sample metrics
-        elif self.test_metrics is not None:
-            shape = (x.shape[1], x.shape[2])
-            
-            with torch.no_grad():
-                sampled = self._run_full_reverse_diffusion(conditioning=x, shape=shape)
-            
-            self._update_metrics(sampled, x, labels, self.test_metrics, "test")
-        
-        return loss
-    
-    def on_test_epoch_start(self):
-        """Clear trajectory results at the start of test epoch."""
-        self.trajectory_results = []
+        self.test_metrics.update(x_pred, x)
+
+        return {
+            "preds": x_pred.detach(), 
+            "targets": x.detach(),
+            "batch_idx": batch_idx
+        }
     
     def on_test_epoch_end(self):
         """Log test metrics at epoch end."""
@@ -482,60 +390,6 @@ class DiffusionLightningModule(L.LightningModule):
                         final_metrics[f"traj_final/{key}"] = sum(values) / len(values)
             if final_metrics:
                 self.log_dict(final_metrics, prog_bar=True, sync_dist=True)
-    
-    def sample(
-        self,
-        batch_size: int,
-        shape: tuple,
-        y: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        """Generate samples using reverse diffusion."""
-        model = self._get_primary_output_model()
-        return self.diffusion.sample(
-            model=model,
-            sample_size=batch_size,
-            shape=shape,
-            y=y,
-            denoiser_output=self.denoiser_output,
-        )
-    
-    def sample_with_trajectory(
-        self,
-        batch_size: int,
-        shape: tuple,
-        y: Optional[torch.Tensor] = None,
-        save_every: int = 1,
-        use_eval_diffusion: bool = True,
-    ):
-        """Generate samples and return the entire trajectory."""
-        model = self._get_primary_output_model()
-        diffusion = self.eval_diffusion if use_eval_diffusion else self.diffusion
-        return diffusion.sample_with_trajectory(
-            model=model,
-            sample_size=batch_size,
-            shape=shape,
-            y=y,
-            denoiser_output=self.denoiser_output,
-            save_every=save_every,
-        )
-    
-    def sample_generator(
-        self,
-        batch_size: int,
-        shape: tuple,
-        y: Optional[torch.Tensor] = None,
-        use_eval_diffusion: bool = True,
-    ):
-        """Generator that yields (timestep, x_t) at each reverse diffusion step."""
-        model = self._get_primary_output_model()
-        diffusion = self.eval_diffusion if use_eval_diffusion else self.diffusion
-        yield from diffusion.reverse_diffusion_generator(
-            model=model,
-            sample_size=batch_size,
-            shape=shape,
-            y=y,
-            denoiser_output=self.denoiser_output,
-        )
     
     def evaluate_trajectory(
         self,

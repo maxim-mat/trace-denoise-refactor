@@ -1,5 +1,5 @@
 import logging
-import os
+from datetime import datetime
 import pickle as pkl
 from pathlib import Path
 from typing import Optional
@@ -12,6 +12,7 @@ from lightning.pytorch.callbacks import (
     RichProgressBar,
 )
 from lightning.pytorch.loggers import Logger, MLFlowLogger, TensorBoardLogger, WandbLogger
+from typing import List
 
 from src.dataset import TracesDataModule
 from src.denoisers import ConditionalUnetDenoiser, ConditionalUnetGraphDenoiser, ConditionalUnetMatrixDenoiser
@@ -134,51 +135,54 @@ def _create_model(cfg: Config, denoiser, diffusion, eval_diffusion) -> Diffusion
     )
 
 
-def _create_logger(cfg: Config) -> Optional[Logger]:
-    """Create experiment logger based on config."""
-    save_dir = Path(cfg.logging.save_dir)
-    save_dir.mkdir(parents=True, exist_ok=True)
+def _create_loggers(cfg: Config, save_dir: Path) -> List[Logger]:
+    """Create experiment loggers based on config.
     
-    if cfg.logging.logger == "tensorboard":
-        return TensorBoardLogger(
-            save_dir=str(save_dir),
-            name=cfg.logging.project_name,
-            version=cfg.logging.experiment_name,
-        )
-    elif cfg.logging.logger == "mlflow":
-        return MLFlowLogger(
-            experiment_name=cfg.logging.project_name,
-            run_name=cfg.logging.experiment_name,
-            tracking_uri=cfg.logging.mlflow_tracking_uri or "mlruns",
-            save_dir=str(save_dir),
-        )
-    elif cfg.logging.logger == "wandb":
-        return WandbLogger(
-            project=cfg.logging.project_name,
-            name=cfg.logging.experiment_name,
-            save_dir=str(save_dir),
-            entity=cfg.logging.wandb_entity,
-            offline=cfg.logging.wandb_offline,
-        )
-    elif cfg.logging.logger == "none":
-        return None
-    raise ValueError(f"Unknown logger: {cfg.logging.logger}")
+    Lightning Trainer accepts a list of loggers and broadcasts every
+    ``self.log`` / ``self.log_dict`` call to all of them automatically.
+    """
+    loggers: List[Logger] = []
+    for name in cfg.logging.loggers:
+        if name == "tensorboard":
+            loggers.append(TensorBoardLogger(
+                save_dir=str(save_dir),
+                name=cfg.logging.project_name,
+                version=cfg.logging.version,
+            ))
+        elif name == "mlflow":
+            loggers.append(MLFlowLogger(
+                experiment_name=cfg.logging.experiment_name,
+                run_name=cfg.logging.run_name,
+                tracking_uri=cfg.logging.mlflow_tracking_uri or "mlruns",
+                save_dir=str(save_dir),
+            ))
+        elif name == "wandb":
+            loggers.append(WandbLogger(
+                entity=cfg.logging.wandb_entity,
+                project=cfg.logging.project_name,
+                offline=cfg.logging.wandb_offline,
+                name=cfg.logging.run_name,
+                version=cfg.logging.version,
+            ))
+        else:
+            raise ValueError(f"Unknown logger: {name}")
+
+    return loggers
 
 
-def _create_callbacks(cfg: Config, save_dir: Path) -> list:
+def _create_callbacks(cfg: Config, save_dir: Path, start_time: str) -> list:
     """Create Lightning callbacks."""
     callbacks = []
     
     # Checkpointing - best model
-    checkpoint_dir = save_dir / "checkpoints"
+    checkpoint_dir = Path(save_dir, "checkpoints")
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     
     callbacks.append(
         ModelCheckpoint(
-            dirpath=str(checkpoint_dir),
-            filename="best-{epoch:03d}-{val_loss:.4f}",
-            monitor=cfg.callbacks.early_stopping_monitor,
-            mode=cfg.callbacks.early_stopping_mode,
+            dirpath=checkpoint_dir,
+            filename=f"{start_time}-{cfg.logging.experiment_name}-{cfg.logging.run_name}-{cfg.logging.version}-{{epoch:03d}}-{{val_loss:.4f}}",
+            mode="min",
             save_top_k=cfg.callbacks.save_top_k,
             save_last=cfg.callbacks.save_last,
             verbose=True,
@@ -213,6 +217,7 @@ def train(cfg: Config):
     """
     # Seed everything for reproducibility
     L.seed_everything(cfg.seed, workers=True)
+    start_time = datetime.now().strftime("%Y%m%d_%H%M%S")
     
     logger.info("Loading dataset from %s", cfg.data.path)
     labels, data = _load_data(cfg)
@@ -234,23 +239,14 @@ def train(cfg: Config):
     diffusion = _create_diffusion(cfg.diffusion.sampler, cfg)
     eval_diffusion = _create_diffusion("ddim", cfg) if cfg.diffusion.eval_use_ddim else diffusion
     model = _create_model(cfg, denoiser, diffusion, eval_diffusion)
-    
-    # Create logger
-    exp_logger = _create_logger(cfg)
-    
-    # Determine save directory
-    if exp_logger is not None and hasattr(exp_logger, 'log_dir'):
-        save_dir = Path(exp_logger.log_dir)
-    else:
-        save_dir = Path(cfg.logging.save_dir) / cfg.logging.project_name
-        if cfg.logging.experiment_name:
-            save_dir = save_dir / cfg.logging.experiment_name
+
+    save_dir = Path(cfg.logging.save_dir, cfg.logging.experiment_name, cfg.logging.run_name)
     save_dir.mkdir(parents=True, exist_ok=True)
+
+    exp_loggers = _create_loggers(cfg, save_dir)
     
-    # Create callbacks
-    callbacks = _create_callbacks(cfg, save_dir)
+    callbacks = _create_callbacks(cfg, save_dir, start_time)
     
-    # Create trainer
     trainer = L.Trainer(
         max_epochs=cfg.trainer.max_epochs,
         accelerator=cfg.trainer.accelerator,
@@ -261,17 +257,17 @@ def train(cfg: Config):
         val_check_interval=cfg.trainer.val_check_interval,
         log_every_n_steps=cfg.trainer.log_every_n_steps,
         deterministic=cfg.trainer.deterministic,
-        logger=exp_logger,
+        logger=exp_loggers if exp_loggers else False,
         callbacks=callbacks,
         default_root_dir=str(save_dir),
     )
     
-    # Log hyperparameters
-    if exp_logger is not None:
-        # Save config as hyperparameters
+    # Log hyperparameters to every logger
+    if exp_loggers:
         from omegaconf import OmegaConf
         hparams = OmegaConf.to_container(OmegaConf.structured(cfg), resolve=True)
-        trainer.logger.log_hyperparams(hparams)
+        for lg in trainer.loggers:
+            lg.log_hyperparams(hparams)
     
     # Train (with optional resume)
     logger.info("Starting training...")

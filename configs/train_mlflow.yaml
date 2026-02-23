@@ -48,7 +48,8 @@ callbacks:
   save_last: true
 
 logging:
-  logger: mlflow
+  loggers:
+    - mlflow
   project_name: trace-denoise
   experiment_name: null
   save_dir: outputs

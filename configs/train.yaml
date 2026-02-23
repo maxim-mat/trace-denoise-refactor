@@ -64,7 +64,8 @@ callbacks:
 
 # Experiment logging
 logging:
-  logger: tensorboard  # tensorboard, mlflow, wandb, none
+  loggers:  # any combo of: tensorboard, mlflow, wandb, none
+    - tensorboard
   project_name: trace-denoise
   experiment_name: null  # null = auto-generated
   save_dir: outputs
