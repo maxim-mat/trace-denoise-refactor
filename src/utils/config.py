@@ -102,6 +102,8 @@ class LoggingConfig:
     run_name: Optional[str] = None
     version: Optional[str] = None
     save_dir: str = MISSING
+    # save every n batches
+    log_samples_every_n: Optional[int] = None
     # MLflow specific
     mlflow_tracking_uri: Optional[str] = None
     # W&B specific

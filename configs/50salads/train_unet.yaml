@@ -74,4 +74,5 @@ metrics:
     - f1
     - wasserstein
     - auroc
+    - confusion_matrix
     

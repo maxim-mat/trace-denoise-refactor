@@ -76,7 +76,7 @@ def create_auroc(num_classes: int, **kwargs) -> torchmetrics.Metric:
 @register_metric("auroc_weighted")
 def create_auroc_weighted(num_classes: int, **kwargs) -> torchmetrics.Metric:
     return MulticlassAUROC(
-        num_classes=num_classes, 
+        num_classes=num_classes,
         average="weighted",
         thresholds=None,
     )

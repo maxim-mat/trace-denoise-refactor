@@ -128,6 +128,8 @@ def _create_model(cfg: Config, denoiser, diffusion, eval_diffusion) -> Diffusion
         gamma=cfg.model.gamma,
         denoiser_output=cfg.diffusion.denoiser_output,
         conditional_dropout=cfg.model.conditional_dropout,
+        ignore_index=cfg.data.padding_value + 1,
+        log_samples_every_n = cfg.logging.log_samples_every_n,
         # Metrics configuration (computed on full reverse diffusion samples)
         num_classes=cfg.data.num_classes,
         val_metrics=cfg.metrics.val,
