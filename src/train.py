@@ -10,6 +10,8 @@ from lightning.pytorch.callbacks import (
     LearningRateMonitor,
     ModelCheckpoint,
     RichProgressBar,
+    BatchSizeFinder,
+    LearningRateFinder,
 )
 from lightning.pytorch.loggers import Logger, MLFlowLogger, TensorBoardLogger, WandbLogger
 from typing import List
@@ -18,165 +20,15 @@ from src.dataset import TracesDataModule
 from src.denoisers import ConditionalUnetDenoiser, ConditionalUnetGraphDenoiser, ConditionalUnetMatrixDenoiser
 from src.diffusion import DiffusionLightningModule, DDPM, DDIM
 from src.utils.config import Config
+from src.utils.setup_utils import load_data, create_datamodule, create_denoiser, create_diffusion, create_model, create_loggers
 
 
 logger = logging.getLogger(__name__)
-
-
-def _load_data(cfg: Config):
-    """Load dataset from pickle file."""
-    with open(cfg.data.path, "rb") as f:
-        payload = pkl.load(f)
-    labels = payload.get("target")
-    data = payload.get("stochastic")
-    if labels is None:
-        raise ValueError("Dataset payload missing 'target' key")
-    if data is None:
-        raise ValueError("Dataset payload missing 'stochastic' key")
-    return labels, data
-
-
-def _create_datamodule(cfg: Config, labels, data) -> TracesDataModule:
-    """Create Lightning DataModule."""
-    get_flow_matrix = cfg.model.type == "unet_matrix"
-    get_graph_data = cfg.model.type == "unet_graph"
-    if (get_flow_matrix or get_graph_data) and cfg.process.method is None:
-        raise ValueError("Process discovery is required for flow matrix or graph data")
-    
-    return TracesDataModule(
-        labels=labels,
-        data=data,
-        final_channels=cfg.data.num_classes,
-        batch_size=cfg.data.batch_size,
-        num_workers=cfg.data.num_workers,
-        val_split=cfg.data.val_split,
-        test_split=cfg.data.test_split,
-        padding_value=cfg.data.padding_value,
-        pin_memory=cfg.data.pin_memory,
-        target_length=cfg.data.target_length,
-        seed=cfg.seed,
-        get_flow_matrix=get_flow_matrix,
-        get_graph_data=get_graph_data,
-        process_discovery_method=cfg.process.method,
-        remove_duplicates=cfg.process.remove_duplicates,
-        activity_names=cfg.process.activity_names,
-    )
-
-
-def _create_denoiser(cfg: Config, flow_matrix=None, graph_data=None):
-    """Create denoiser model based on config."""
-    if cfg.model.type == "unet":
-        return ConditionalUnetDenoiser(
-            in_ch=cfg.data.num_classes,
-            out_ch=cfg.data.num_classes,
-            time_dim=cfg.model.time_dim,
-        )
-    elif cfg.model.type == "unet_matrix":
-        return ConditionalUnetMatrixDenoiser(
-            in_ch=cfg.data.num_classes,
-            out_ch=cfg.data.num_classes,
-            time_dim=cfg.model.time_dim,
-            transition_dim=cfg.model.flow_matrix_dim,
-            flow_matrix=flow_matrix,
-            latent_flow_matrix=cfg.model.latent_matrix,
-            matrix_out_channels=cfg.model.matrix_out_channels,
-        )
-    elif cfg.model.type == "unet_graph":
-        return ConditionalUnetGraphDenoiser(
-            in_ch=cfg.data.num_classes,
-            out_ch=cfg.data.num_classes,
-            time_dim=cfg.model.time_dim,
-            graph_data=graph_data,
-            embedding_dim=cfg.model.node_embedding_dim,
-            hidden_dim=cfg.model.graph_hidden_dim,
-            pooling=cfg.model.pooling,
-        )
-    else:
-        raise ValueError(f"Unknown model type: {cfg.model.type}")
-
-
-def _create_diffusion(sampler, cfg: Config) -> Optional[DDPM | DDIM]:
-    """Create diffusion process based on config."""
-    if sampler == "ddpm":
-        return DDPM(
-            noise_steps=cfg.diffusion.noise_steps,
-            beta_start=cfg.diffusion.beta_start,
-            beta_end=cfg.diffusion.beta_end,
-        )
-    elif sampler == "ddim":
-        return DDIM(
-            noise_steps=cfg.diffusion.noise_steps,
-            inference_steps=cfg.diffusion.ddim_inference_steps,
-            eta=cfg.diffusion.ddim_eta,
-            beta_start=cfg.diffusion.beta_start,
-            beta_end=cfg.diffusion.beta_end,
-        )
-    return None
-
-
-def _create_model(cfg: Config, denoiser, diffusion, eval_diffusion) -> DiffusionLightningModule:
-    """Create DiffusionLightningModule."""
-    return DiffusionLightningModule(
-        denoiser=denoiser,
-        diffusion=diffusion,
-        eval_diffusion=eval_diffusion,
-        noise_steps=cfg.diffusion.noise_steps,
-        beta_start=cfg.diffusion.beta_start,
-        beta_end=cfg.diffusion.beta_end,
-        learning_rate=cfg.optimizer.learning_rate,
-        loss_type=cfg.model.loss_function,
-        gamma=cfg.model.gamma,
-        denoiser_output=cfg.diffusion.denoiser_output,
-        conditional_dropout=cfg.model.conditional_dropout,
-        ignore_index=cfg.data.padding_value + 1,
-        log_samples_every_n = cfg.logging.log_samples_every_n,
-        # Metrics configuration (computed on full reverse diffusion samples)
-        num_classes=cfg.data.num_classes,
-        val_metrics=cfg.metrics.val,
-        test_metrics=cfg.metrics.test,
-    )
-
-
-def _create_loggers(cfg: Config, save_dir: Path) -> List[Logger]:
-    """Create experiment loggers based on config.
-    
-    Lightning Trainer accepts a list of loggers and broadcasts every
-    ``self.log`` / ``self.log_dict`` call to all of them automatically.
-    """
-    loggers: List[Logger] = []
-    for name in cfg.logging.loggers:
-        if name == "tensorboard":
-            loggers.append(TensorBoardLogger(
-                save_dir=str(save_dir),
-                name=cfg.logging.project_name,
-                version=cfg.logging.version,
-            ))
-        elif name == "mlflow":
-            loggers.append(MLFlowLogger(
-                experiment_name=cfg.logging.experiment_name,
-                run_name=cfg.logging.run_name,
-                tracking_uri=cfg.logging.mlflow_tracking_uri or "mlruns",
-                save_dir=str(save_dir),
-            ))
-        elif name == "wandb":
-            loggers.append(WandbLogger(
-                entity=cfg.logging.wandb_entity,
-                project=cfg.logging.project_name,
-                offline=cfg.logging.wandb_offline,
-                name=cfg.logging.run_name,
-                version=cfg.logging.version,
-            ))
-        else:
-            raise ValueError(f"Unknown logger: {name}")
-
-    return loggers
-
 
 def _create_callbacks(cfg: Config, save_dir: Path, start_time: str) -> list:
     """Create Lightning callbacks."""
     callbacks = []
     
-    # Checkpointing - best model
     checkpoint_dir = Path(save_dir, "checkpoints")
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     
@@ -190,8 +42,21 @@ def _create_callbacks(cfg: Config, save_dir: Path, start_time: str) -> list:
             verbose=True,
         )
     )
+
+    callbacks.append(BatchSizeFinder(
+            mode="bisearch",
+            margin=0.1,
+        )
+    )
+
+    callbacks.append(LearningRateFinder(
+            min_lr=1e-6,
+            max_lr=1e-3,
+            num_training_steps=100,
+            mode="exponential",
+        )
+    )
     
-    # Early stopping
     if cfg.callbacks.early_stopping:
         callbacks.append(
             EarlyStopping(
@@ -202,10 +67,8 @@ def _create_callbacks(cfg: Config, save_dir: Path, start_time: str) -> list:
             )
         )
     
-    # Learning rate monitor
     callbacks.append(LearningRateMonitor(logging_interval="epoch"))
     
-    # Progress bar
     callbacks.append(RichProgressBar())
     
     return callbacks
@@ -222,10 +85,10 @@ def train(cfg: Config):
     start_time = datetime.now().strftime("%Y%m%d_%H%M%S")
     
     logger.info("Loading dataset from %s", cfg.data.path)
-    labels, data = _load_data(cfg)
+    labels, data = load_data(cfg)
     
     # Create datamodule
-    datamodule = _create_datamodule(cfg, labels, data)
+    datamodule = create_datamodule(cfg, labels, data)
     datamodule.setup()
     
     logger.info(
@@ -237,15 +100,15 @@ def train(cfg: Config):
     )
     
     # Create model components
-    denoiser = _create_denoiser(cfg, datamodule.flow_matrix, datamodule.graph_data)
-    diffusion = _create_diffusion(cfg.diffusion.sampler, cfg)
-    eval_diffusion = _create_diffusion("ddim", cfg) if cfg.diffusion.eval_use_ddim else diffusion
-    model = _create_model(cfg, denoiser, diffusion, eval_diffusion)
+    denoiser = create_denoiser(cfg, datamodule.flow_matrix, datamodule.graph_data)
+    diffusion = create_diffusion(cfg.diffusion.sampler, cfg)
+    eval_diffusion = create_diffusion("ddim", cfg) if cfg.diffusion.eval_use_ddim else diffusion
+    model = create_model(cfg, denoiser, diffusion, eval_diffusion)
 
     save_dir = Path(cfg.logging.save_dir, cfg.logging.experiment_name, cfg.logging.run_name)
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    exp_loggers = _create_loggers(cfg, save_dir)
+    exp_loggers = create_loggers(cfg, save_dir)
     
     callbacks = _create_callbacks(cfg, save_dir, start_time)
     
@@ -284,5 +147,3 @@ def train(cfg: Config):
     trainer.test(model, datamodule=datamodule, ckpt_path="best")
     
     logger.info("Training complete. Best checkpoint: %s", trainer.checkpoint_callback.best_model_path)
-    
-    return trainer, model, datamodule

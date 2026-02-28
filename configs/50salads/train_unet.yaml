@@ -5,11 +5,10 @@ seed: 42
 
 data:
   path: data/processed/50salads_dict.pkl
-  num_classes: 20
+  num_classes: 19
   train_split: 0.7
   val_split: 0.1
   test_split: 0.2
-  padding_value: 19
   batch_size: 5
   num_workers: 4
   pin_memory: true
@@ -19,6 +18,7 @@ model:
   type: unet
   loss_function: cross_entropy
   time_dim: 128
+  n_channels: 20
   conditional_dropout: 0.2
   
 diffusion:

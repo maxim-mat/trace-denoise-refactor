@@ -40,6 +40,7 @@ class ConditionalUnetGraphDenoiser(nn.Module):
         super().__init__()
         self.time_dim = time_dim
         self.graph_data = graph_data
+        self.register_buffer('graph_data', self.graph_data)
         self.gnn_pooling = pooling
         self.num_nodes = self.graph_data.num_nodes
 

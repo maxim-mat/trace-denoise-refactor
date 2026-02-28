@@ -6,11 +6,14 @@ from typing import Literal, Optional, Dict, Any, List, Tuple, Union
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
+from src.utils.config import Config
+from omegaconf import OmegaConf
 
 from .base_diffusion import BaseDiffusion
 from src.modules.learnable_hybrid_loss import LearnableHybridLoss
 from src.modules.hybrid_loss import HybridLoss
 from src.utils.metrics import create_metric_collection
+from src.utils.setup_utils import create_denoiser, create_diffusion
 
 
 class DiffusionLightningModule(L.LightningModule):
@@ -35,100 +38,68 @@ class DiffusionLightningModule(L.LightningModule):
         denoiser: nn.Module,
         diffusion: BaseDiffusion,
         eval_diffusion: BaseDiffusion,
-        optimizer: Literal["adamw", "adam", "sgd"] = "adamw",
-        learning_rate: Optional[float] = 1e-4,
-        weight_decay: Optional[float] = 0.0,
-        scheduler: Literal["cosine", "step", "none"] = "cosine",
-        warmup_epochs: Optional[int] = 0,
-        loss_type: Literal["mse", "l1", "cross_entropy", "hybrid", "learnable_hybrid"] = "cross_entropy",
-        gamma: float = 1.0,
-        denoiser_output: Literal["noise", "original"] = "original",
-        conditional_dropout: float = 0.0,
-        denoiser_config: Optional[Dict[str, Any]] = None,
-        ignore_index: Optional[int] = None,
-        # save output samples every n batches
-        log_samples_every_n: Optional[int] = 1,
-        # Metrics configuration
-        num_classes: Optional[int] = None,
-        val_metrics: Optional[List[str]] = None,
-        test_metrics: Optional[List[str]] = None,
-        # Verbose test mode (trajectory analysis during inference)
-        verbose_test: bool = False,  # Enable trajectory evaluation during test
-        trajectory_metrics: Optional[List[str]] = None,  # Metrics to compute along trajectory
-        trajectory_save_every: int = 10,  # Evaluate every N steps along trajectory
+        config: Config,
     ):
-        """
-        Args:
-            denoiser: Neural network that predicts noise or original from noisy input.
-                      Returns tensor or tuple (primary_output, *auxiliary_outputs).
-            diffusion: Diffusion process (DDPM, DDIM, etc.). If None, creates DDPM.
-            noise_steps: Number of diffusion steps
-            beta_start: Starting value for noise schedule
-            beta_end: Ending value for noise schedule
-            learning_rate: Learning rate for optimizer
-            loss_type: Type of loss function for primary output
-            denoiser_output: What the denoiser predicts - 'noise' or 'original'
-            conditional_dropout: Probability of dropping conditioning during training
-            auxiliary_losses: List of auxiliary loss configs for multi-output denoisers.
-                Each dict has: output_index, loss_type, weight, target.
-                Example for matrix denoiser: [{"output_index": 1, "loss_type": "bce_logits", 
-                    "weight": 0.5, "target": "labels"}]
-            denoiser_config: Config dict for reconstructing denoiser from checkpoint
-            num_classes: Number of classes for metrics (required if using metrics)
-            val_metrics: List of metric names to compute during validation
-            test_metrics: List of metric names to compute during testing
-            eval_every_n_epochs: Run full metrics evaluation every N epochs (0 = never)
-            eval_use_ddim: Whether to use DDIM for faster evaluation sampling
-            eval_ddim_steps: Number of DDIM steps when eval_use_ddim=True
-            verbose_test: Enable trajectory evaluation during test (for inference analysis)
-            trajectory_metrics: Metrics to compute at each point along reverse diffusion
-            trajectory_save_every: Evaluate trajectory every N steps (1 = all steps)
-        """
         super().__init__()
-        
-        # Store denoiser config for checkpoint loading
-        if denoiser_config is None and denoiser is not None:
-            denoiser_config = {
-                "class": denoiser.__class__.__name__,
-                "module": denoiser.__class__.__module__,
-            }
-            if hasattr(denoiser, 'time_dim'):
-                denoiser_config["time_dim"] = denoiser.time_dim
-            if hasattr(denoiser, 'max_input_dim'):
-                denoiser_config["max_input_dim"] = denoiser.max_input_dim
-        
-        self.save_hyperparameters(ignore=['denoiser', 'diffusion', 'eval_diffusion'])
+        self.save_hyperparameters(
+            OmegaConf.to_container(OmegaConf.structured(config), resolve=True),
+            ignore=['denoiser', 'diffusion', 'eval_diffusion'],
+        )
         
         self.denoiser = denoiser
-        self.optimizer = optimizer
         self.diffusion = diffusion
         self.eval_diffusion = eval_diffusion
-        self.learning_rate = learning_rate
-        self.weight_decay = weight_decay
-        self.scheduler = scheduler
-        self.warmup_epochs = warmup_epochs
-        self.denoiser_output = denoiser_output
-        self.conditional_dropout = conditional_dropout
-        self.gamma = gamma
-        self.loss_type = loss_type
-        self.num_classes = num_classes
-        self.verbose_test = verbose_test
-        self.trajectory_metrics = trajectory_metrics or ["accuracy"]
-        self.trajectory_save_every = trajectory_save_every
+        self.optimizer = config.optimizer.method
+        self.learning_rate = config.optimizer.learning_rate
+        self.weight_decay = config.optimizer.weight_decay
+        self.scheduler = config.optimizer.scheduler
+        self.warmup_epochs = config.optimizer.warmup_epochs
+        self.denoiser_output = config.diffusion.denoiser_output
+        self.conditional_dropout = config.model.conditional_dropout
+        self.auxilary_dropout = config.model.auxilary_dropout
+        self.gamma = config.model.gamma
+        self.loss_type = config.model.loss_function
+        self.num_classes = config.data.num_classes
+        self.verbose_test = config.logging.verbose_test
+        self.trajectory_metrics = config.metrics.verbose_trajectory or ["accuracy"]
+        self.trajectory_save_every = config.metrics.trajectory_save_every
         
-        self.loss_fn = self._create_loss_fn(loss_type)
-        self.ignore_index = ignore_index
-        self.log_samples_every_n = log_samples_every_n
+        self.loss_fn = self._create_loss_fn(self.loss_type)
+        self.ignore_index = config.data.num_classes
+        self.log_samples_every_n = config.logging.log_samples_every_n
         
-        # Setup metrics
         self._setup_metrics(
-            num_classes=num_classes,
-            val_metrics=val_metrics or [],
-            test_metrics=test_metrics or [],
+            num_classes=self.num_classes,
+            val_metrics=config.metrics.val or [],
+            test_metrics=config.metrics.test or [],
         )
 
-        # Storage for trajectory analysis results (populated during verbose test)
         self.trajectory_results: List[Dict[str, Any]] = []
+
+    @classmethod
+    def load_from_experiment(cls, checkpoint_path: str, map_location=None):
+        """
+        Reconstructs the model skeleton and pours in the checkpoint weights,
+        automatically restoring graph buffers and flow matrices.
+        """
+        checkpoint = torch.load(checkpoint_path, map_location=map_location)
+        hparams = checkpoint.get("hyper_parameters")
+        
+        from omegaconf import OmegaConf
+        cfg = OmegaConf.create(hparams)
+
+        denoiser = create_denoiser(cfg, flow_matrix=None, graph_data=None)
+        diffusion = create_diffusion(cfg.diffusion.sampler, cfg)
+        eval_diffusion = create_diffusion("ddim", cfg) if cfg.diffusion.eval_use_ddim else diffusion
+
+        model = cls.load_from_checkpoint(
+            checkpoint_path,
+            denoiser=denoiser,
+            diffusion=diffusion,
+            eval_diffusion=eval_diffusion,
+            map_location=map_location
+        )
+        return model
 
     def _create_loss_fn(self, loss_type: str) -> nn.Module:
         """Create a loss function from type string."""
@@ -253,6 +224,8 @@ class DiffusionLightningModule(L.LightningModule):
         
         if torch.rand(1).item() < self.conditional_dropout:
             y = None
+
+        use_aux = torch.rand(1).item() > self.auxilary_dropout
         
         if self.denoiser_output == "noise":
             target = noise
@@ -262,7 +235,7 @@ class DiffusionLightningModule(L.LightningModule):
         if self.loss_type in {"hybrid", "learnable_hybrid"}:
             target = (target, self.denoiser.gt_flow_matrix)
         
-        denoiser_out = self.denoiser(x_t, t, y)
+        denoiser_out = self.denoiser(x_t, t, y, use_aux)
         if self.loss_type in {"cross_entropy", "hybrid", "learnable_hybrid"}:
             loss = self.loss_fn(denoiser_out, target, ignore_index=self.ignore_index)
         else:
@@ -307,9 +280,6 @@ class DiffusionLightningModule(L.LightningModule):
         t = self.diffusion.sample_timesteps(x.shape[0])
         x_t, noise = self.diffusion.noise_data(x, t)
         
-        if torch.rand(1).item() < self.conditional_dropout:
-            y = None
-        
         if self.denoiser_output == "noise":
             target = noise
         else:
@@ -338,7 +308,7 @@ class DiffusionLightningModule(L.LightningModule):
         x, y = batch
         x = x.permute(0, 2, 1).float()  # (B, C, L)
         
-        x_pred = self.eval_diffusion.sample(self.denosier, x.shape[0], (x.shape[1], x.shape[2]), y, self.denoiser_output)
+        x_pred = self.eval_diffusion.sample(self.denosier, y.shape[0], (y.shape[1], y.shape[2]), y, self.denoiser_output)
         self.test_metrics.update(x_pred, x)
 
         return {
@@ -347,6 +317,17 @@ class DiffusionLightningModule(L.LightningModule):
             "batch_idx": batch_idx
         }
 
+    def predict_step(self, batch, batch_idx):
+        """
+        Predict step.
+        
+        - Every n batches: Log a sample of the predictions and targets
+        """
+        y = batch
+        x_pred = self.eval_diffusion.sample(self.denosier, y.shape[0], (y.shape[1], y.shape[2]), y, self.denoiser_output)
+
+        return torch.argmax(torch.softmax(x_pred, dim=1), dim=1)
+        
     def on_test_batch_end(self, outputs, batch, batch_idx, dataloader_idx=0):
         # Only log a sample of batches to avoid slowing down testing
         if batch_idx % self.log_samples_every_n != 0:
@@ -441,6 +422,7 @@ class DiffusionLightningModule(L.LightningModule):
                 elif isinstance(logger, L.pytorch.loggers.TensorBoardLogger):
                     fig = self._create_heatmap_figure(cm) # Use matplotlib to create a figure
                     logger.experiment.add_figure("test/conf_matrix", fig, self.global_step)
+                    plt.close(fig)
     
     def on_test_epoch_end(self):
         """Log test metrics at epoch end."""

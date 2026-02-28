@@ -139,7 +139,7 @@ class ConditionalUnetDenoiser(nn.Module):
 
         return x
 
-    def forward(self, x, t, y=None):
+    def forward(self, x, t, y=None, *args, **kwargs):
         """
         Forward pass for denoising.
         

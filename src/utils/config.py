@@ -27,6 +27,7 @@ class ModelConfig:
     gamma: Optional[float] = 1.0  # weight of main loss for hybrid loss
     time_dim: int = 128
     conditional_dropout: Optional[float] = 0.2
+    auxilary_dropout: Optional[float] = 0.2
     # Parameters for advanced denoisers
     latent_matrix: Optional[bool] = True
     flow_matrix_dim: Optional[int] = 100  # shape of flow matrix
