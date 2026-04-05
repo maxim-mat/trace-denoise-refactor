@@ -38,6 +38,7 @@ def _create_callbacks(cfg: Config, save_dir: Path, start_time: str) -> list:
             dirpath=checkpoint_dir,
             filename=f"{start_time}-{cfg.logging.experiment_name}-{cfg.logging.run_name}-{cfg.logging.version}-{{epoch:03d}}-{{val_loss:.4f}}",
             mode="min",
+            monitor="val_loss",
             save_top_k=cfg.callbacks.save_top_k,
             save_last=cfg.callbacks.save_last,
             verbose=True,
@@ -45,7 +46,7 @@ def _create_callbacks(cfg: Config, save_dir: Path, start_time: str) -> list:
     )
 
     callbacks.append(BatchSizeFinder(
-            mode="bisearch",
+            mode="binsearch",
             margin=0.1,
         )
     )

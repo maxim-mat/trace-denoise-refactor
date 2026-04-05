@@ -140,8 +140,8 @@ class WassersteinDistance(torchmetrics.Metric):
 
 
 @register_metric("wasserstein")
-def create_wasserstein(ignore_index: Optional[int] = None, **kwargs) -> torchmetrics.Metric:
-    return WassersteinDistance(ignore_index=ignore_index)
+def create_wasserstein(num_classes: int, ignore_index: Optional[int] = None, **kwargs) -> torchmetrics.Metric:
+    return WassersteinDistance(num_classes=num_classes, ignore_index=ignore_index, **kwargs)
 
 
 def create_metric_collection(

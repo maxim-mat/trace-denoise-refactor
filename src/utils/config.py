@@ -22,6 +22,7 @@ class DataConfig:
 @dataclass
 class ModelConfig:
     """Model/denoiser configuration."""
+    n_channels: int = MISSING
     type: str = "unet"  # "unet", "unet_matrix", "unet_graph"
     loss_function: str = "cross_entropy"  # "mse", "l1", "cross_entropy", "hybrid"
     gamma: Optional[float] = 1.0  # weight of main loss for hybrid loss
@@ -103,6 +104,7 @@ class LoggingConfig:
     run_name: Optional[str] = None
     version: Optional[str] = None
     save_dir: str = MISSING
+    verbose_test: bool = False
     # save every n batches
     log_samples_every_n: Optional[int] = None
     # MLflow specific
@@ -129,15 +131,14 @@ class MetricsConfig:
     - recall: Macro-averaged recall
     - f1: Macro-averaged F1 score
     - auroc: Macro-averaged AUROC (may fail if not all classes present)
-    - safe_auroc: AUROC that returns -1 instead of failing
     - auroc_weighted: Weighted AUROC
     - wasserstein: Wasserstein-1 distance between sequences
     - confusion_matrix: Normalized confusion matrix
     """
     # Metrics to compute during validation (requires full reverse diffusion)
-    val: List[str] = field(default_factory=lambda: ["accuracy", "precision", "recall", "f1", "safe_auroc"])
+    val: List[str] = field(default_factory=lambda: [])
     # Metrics to compute during testing
-    test: List[str] = field(default_factory=lambda: ["accuracy", "precision", "recall", "f1", "safe_auroc", "wasserstein"])
+    test: List[str] = field(default_factory=lambda: ["accuracy", "precision", "recall", "f1", "auroc", "wasserstein"])
     verbose_trajectory: bool = False
     trajectory_save_every: int = 5
 
