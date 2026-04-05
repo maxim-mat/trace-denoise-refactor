@@ -288,7 +288,7 @@ class DiffusionLightningModule(L.LightningModule):
         if self.loss_type in {"hybrid", "learnable_hybrid"}:
             target = (target, self.denoiser.gt_flow_matrix)
         
-        denoiser_out = self.denoiser(x_t, t, y, use_aux)
+        denoiser_out = self.denoiser(x_t, t, y, use_aux, mask=mask)
         loss = self._compute_loss(denoiser_out, target, mask)
         self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True)
         if self.loss_type == "hybrid":
@@ -338,7 +338,7 @@ class DiffusionLightningModule(L.LightningModule):
         if self.loss_type in {"hybrid", "learnable_hybrid"}:
             target = (target, self.denoiser.gt_flow_matrix)
         
-        denoiser_out = self.denoiser(x_t, t, y)
+        denoiser_out = self.denoiser(x_t, t, y, mask=mask)
         loss = self._compute_loss(denoiser_out, target, mask)
         
         self.log("val/loss", loss, on_step=True, on_epoch=True, prog_bar=True)
