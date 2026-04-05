@@ -396,7 +396,7 @@ class ConditionalUnetMatrixDenoiser(nn.Module):
             
         Returns:
             If use_matrix=True: (x_hat, m_hat) - trace and matrix predictions
-            If use_matrix=False: x_hat - trace prediction only
+            If use_matrix=False: (x_hat, None)
             
             Primary output (trace) is always first.
         """

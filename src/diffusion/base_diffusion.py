@@ -1,9 +1,10 @@
 import torch
+import torch.nn as nn
 from abc import abstractmethod, ABC
 from typing import Generator, Tuple, List, Optional
 
 
-class BaseDiffusion(ABC):
+class BaseDiffusion(nn.Module, ABC):
     """
     Base class for diffusion processes.
     
@@ -12,16 +13,18 @@ class BaseDiffusion(ABC):
     - denoising_step(): The actual denoising formula
     
     The sampling loop and generator are implemented generically here.
+    Inherits from nn.Module so Lightning manages device placement of schedule tensors.
     """
     
     def __init__(self, noise_steps=1000, beta_start=1e-4, beta_end=0.02):
+        super().__init__()
         self.noise_steps = noise_steps
         self.beta_start = beta_start
         self.beta_end = beta_end
 
-        self.beta = self.prepare_noise_schedule()
-        self.alpha = 1. - self.beta
-        self.alpha_hat = torch.cumprod(self.alpha, dim=0)
+        self.register_buffer('beta', self.prepare_noise_schedule())
+        self.register_buffer('alpha', 1. - self.beta)
+        self.register_buffer('alpha_hat', torch.cumprod(self.alpha, dim=0))
 
     def prepare_noise_schedule(self) -> torch.Tensor:
         """Create linear noise schedule."""
@@ -29,7 +32,7 @@ class BaseDiffusion(ABC):
 
     def sample_timesteps(self, n_timesteps: int) -> torch.Tensor:
         """Sample random timesteps for training."""
-        return torch.randint(low=1, high=self.noise_steps, size=(n_timesteps,))
+        return torch.randint(low=1, high=self.noise_steps, size=(n_timesteps,), device=self.beta.device)
 
     def noise_data(self, x: torch.Tensor, t: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -110,14 +113,14 @@ class BaseDiffusion(ABC):
             Tuple of (timestep, x_t) at each step, starting from pure noise
         """
         # Start with pure noise
-        x = torch.randn((batch_size, *shape), device=self.device)
+        x = torch.randn((batch_size, *shape), device=self.beta.device)
         
         # Yield initial noise state
         yield self.noise_steps, x
         
         # Iterate through timestep pairs
         for t, t_prev in self.get_timestep_pairs():
-            t_tensor = torch.full((batch_size,), t, device=self.device, dtype=torch.long)
+            t_tensor = torch.full((batch_size,), t, device=self.beta.device, dtype=torch.long)
             
             # Get model prediction
             with torch.no_grad():

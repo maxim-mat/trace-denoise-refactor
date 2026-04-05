@@ -57,8 +57,8 @@ class DDIM(BaseDiffusion):
         
         where σ² = η² * (1-ᾱ_{t-1})/(1-ᾱ_t) * (1 - ᾱ_t/ᾱ_{t-1})
         """
-        t_tensor = torch.full((batch_size,), t, dtype=torch.long)
-        t_prev_tensor = torch.full((batch_size,), max(t_prev, 0), dtype=torch.long)
+        t_tensor = torch.full((batch_size,), t, dtype=torch.long, device=self.beta.device)
+        t_prev_tensor = torch.full((batch_size,), max(t_prev, 0), dtype=torch.long, device=self.beta.device)
         
         alpha_hat = self.alpha_hat[t_tensor][:, None, None]
         alpha_hat_prev = self.alpha_hat[t_prev_tensor][:, None, None] if t_prev > 0 else torch.ones_like(alpha_hat)

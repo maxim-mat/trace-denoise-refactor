@@ -36,8 +36,8 @@ class DDPM(BaseDiffusion):
         For denoiser_output='original':
             x_{t-1} = (√ᾱ_{t-1} * β_t)/(1-ᾱ_t) * x̂_0 + (√α_t * (1-ᾱ_{t-1}))/(1-ᾱ_t) * x_t + σ_t * z
         """
-        t_tensor = torch.full((batch_size,), t, dtype=torch.long)
-        t_prev_tensor = torch.full((batch_size,), t_prev, dtype=torch.long)
+        t_tensor = torch.full((batch_size,), t, dtype=torch.long, device=self.beta.device)
+        t_prev_tensor = torch.full((batch_size,), t_prev, dtype=torch.long, device=self.beta.device)
         
         alpha = self.alpha[t_tensor][:, None, None]
         alpha_hat = self.alpha_hat[t_tensor][:, None, None]

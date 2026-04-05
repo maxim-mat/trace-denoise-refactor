@@ -73,6 +73,7 @@ class TrainerConfig:
     val_check_interval: float = 1.0
     log_every_n_steps: int = 50
     deterministic: bool = False
+    fast_dev_run: bool = False
 
 
 @dataclass

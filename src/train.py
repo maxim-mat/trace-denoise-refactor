@@ -127,6 +127,7 @@ def train(cfg: Config):
         logger=exp_loggers if exp_loggers else False,
         callbacks=callbacks,
         default_root_dir=str(save_dir),
+        fast_dev_run=cfg.trainer.fast_dev_run,
     )
     
     # Log hyperparameters to every logger

@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from .double_conv import DoubleConv
 
 
@@ -22,6 +23,10 @@ class Up(nn.Module):
 
     def forward(self, x, skip_x, t):
         x = self.up(x)
+        # Pad upsampled x to match skip connection length (preserves full resolution)
+        diff = skip_x.shape[-1] - x.shape[-1]
+        if diff > 0:
+            x = F.pad(x, (0, diff))
         x = torch.cat([skip_x, x], dim=1)
         x = self.conv(x)
         emb = self.emb_layer(t).unsqueeze(2).repeat(1, 1, x.shape[2])

@@ -21,13 +21,18 @@ class SelfAttention(nn.Module):
             nn.Linear(channels, channels),
         )
 
-    def forward(self, x):
+    def forward(self, x, key_padding_mask=None):
         # x: (B, C, L) -> (B, L, C) for attention
+        # key_padding_mask: (B, L) bool, True = real, False = padding
+        #   (inverted before passing to MHA which expects True = ignore)
         batch_size, channels, seq_len = x.shape
         x = x.permute(0, 2, 1)  # (B, L, C)
         
+        # nn.MultiheadAttention expects True = ignore position
+        attn_mask = ~key_padding_mask if key_padding_mask is not None else None
+
         x_ln = self.ln(x)
-        attention_value, _ = self.mha(x_ln, x_ln, x_ln)
+        attention_value, _ = self.mha(x_ln, x_ln, x_ln, key_padding_mask=attn_mask)
         attention_value = attention_value + x
         attention_value = self.ff_self(attention_value) + attention_value
         

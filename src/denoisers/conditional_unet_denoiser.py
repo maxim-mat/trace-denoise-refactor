@@ -3,6 +3,20 @@ import torch.nn as nn
 from src.modules import DoubleConv, Up, Down, SelfAttention
 
 
+def _downsample_mask(mask, factor=2):
+    """Downsample a boolean mask (B, L) by max-pooling.
+    
+    If any position in a pooling window is True (real), the output is True.
+    Uses float max-pool then converts back to bool.
+    """
+    if mask is None:
+        return None
+    # (B, L) -> (B, 1, L) for max_pool1d
+    m = mask.float().unsqueeze(1)
+    m = torch.nn.functional.max_pool1d(m, kernel_size=factor)
+    return m.squeeze(1).bool()  # (B, L//factor)
+
+
 class ConditionalUnetDenoiser(nn.Module):
     """
     Conditional U-Net denoiser architecture.
@@ -72,49 +86,60 @@ class ConditionalUnetDenoiser(nn.Module):
         pos_enc = torch.cat([pos_enc_a, pos_enc_b], dim=-1)
         return pos_enc
 
-    def _forward_uncond(self, x, t):
+    def _forward_uncond(self, x, t, mask=None):
         t = t.unsqueeze(-1).type(torch.float)
         t = self.pos_encoding(t, self.time_dim, x.device)
 
+        # Downsample mask at each level (L -> L//2 -> L//4 -> L//8)
+        mask1 = mask                             # L
+        mask2 = _downsample_mask(mask1)          # L//2
+        mask3 = _downsample_mask(mask2)          # L//4
+        mask4 = _downsample_mask(mask3)          # L//8
+
         x1 = self.inc(x)
         x2 = self.down1(x1, t)
-        x2 = self.sa1(x2)
+        x2 = self.sa1(x2, key_padding_mask=mask2)
         x3 = self.down2(x2, t)
-        x3 = self.sa2(x3)
+        x3 = self.sa2(x3, key_padding_mask=mask3)
         x4 = self.down3(x3, t)
-        x4 = self.sa3(x4)
+        x4 = self.sa3(x4, key_padding_mask=mask4)
 
         x4 = self.bot1(x4)
         x4 = self.bot2(x4)
         x4 = self.bot3(x4)
 
         x = self.up1(x4, x3, t)
-        x = self.sa4(x)
+        x = self.sa4(x, key_padding_mask=mask3)
         x = self.up2(x, x2, t)
-        x = self.sa5(x)
+        x = self.sa5(x, key_padding_mask=mask2)
         x = self.up3(x, x1, t)
-        x = self.sa6(x)
+        x = self.sa6(x, key_padding_mask=mask1)
         x = self.outc(x)
         return x
 
-    def _forward_cond(self, x, y, t):
+    def _forward_cond(self, x, y, t, mask=None):
         t = t.unsqueeze(-1).type(torch.float)
         t = self.pos_encoding(t, self.time_dim, x.device)
+
+        mask1 = mask
+        mask2 = _downsample_mask(mask1)
+        mask3 = _downsample_mask(mask2)
+        mask4 = _downsample_mask(mask3)
 
         y1 = self.inc_cond(y)
         x1 = self.inc(x)
         x2 = self.down1(x1 + y1, t)
         y2 = self.down1_cond(x1 + y1, t)
-        y2 = self.sa1_cond(y2)
-        x2 = self.sa1(x2)
+        y2 = self.sa1_cond(y2, key_padding_mask=mask2)
+        x2 = self.sa1(x2, key_padding_mask=mask2)
         x3 = self.down2(x2 + y2, t)
-        x3 = self.sa2(x3)
+        x3 = self.sa2(x3, key_padding_mask=mask3)
         y3 = self.down2_cond(x2 + y2, t)
-        y3 = self.sa2_cond(y3)
+        y3 = self.sa2_cond(y3, key_padding_mask=mask3)
         x4 = self.down3(x3 + y3, t)
-        x4 = self.sa3(x4)
+        x4 = self.sa3(x4, key_padding_mask=mask4)
         y4 = self.down3_cond(x3 + y3, t)
-        y4 = self.sa3_cond(y4)
+        y4 = self.sa3_cond(y4, key_padding_mask=mask4)
 
         x4 = self.bot1(x4)
         x4 = self.bot2(x4)
@@ -125,21 +150,21 @@ class ConditionalUnetDenoiser(nn.Module):
 
         y = self.up1(x4 + y4, y3, t)
         x = self.up1(x4 + y4, x3, t)
-        x = self.sa4(x)
-        y = self.sa4(y)
+        x = self.sa4(x, key_padding_mask=mask3)
+        y = self.sa4(y, key_padding_mask=mask3)
         x_next = self.up2(x + y, x2, t)
         y_next = self.up2(x + y, y2, t)
-        y_next = self.sa5(y_next)
-        x_next = self.sa5(x_next)
+        y_next = self.sa5(y_next, key_padding_mask=mask2)
+        x_next = self.sa5(x_next, key_padding_mask=mask2)
         x = self.up3(x_next + y_next, x1, t)
         y = self.up3(x_next + y_next, y1, t)
-        y = self.sa6(y)
-        x = self.sa6(x)
+        y = self.sa6(y, key_padding_mask=mask1)
+        x = self.sa6(x, key_padding_mask=mask1)
         x = self.outc(x + y)
 
         return x
 
-    def forward(self, x, t, y=None, *args, **kwargs):
+    def forward(self, x, t, y=None, *args, mask=None, **kwargs):
         """
         Forward pass for denoising.
         
@@ -147,10 +172,11 @@ class ConditionalUnetDenoiser(nn.Module):
             x: Noisy input tensor (B, C, L)
             t: Diffusion timestep (B,)
             y: Optional conditioning tensor (B, C, L)
+            mask: Optional padding mask (B, L), True = real, False = padding
             
         Returns:
             Denoised output tensor (B, C, L)
         """
         if y is not None:
-            return self._forward_cond(x, y, t)
-        return self._forward_uncond(x, t)
+            return self._forward_cond(x, y, t, mask=mask)
+        return self._forward_uncond(x, t, mask=mask)

@@ -271,6 +271,7 @@ class DiffusionLightningModule(L.LightningModule):
         """
         x, y, mask = self._unpack_batch(batch)
         x = x.permute(0, 2, 1).float()  # (B, C, L)
+        y = y.permute(0, 2, 1).float()
         
         t = self.diffusion.sample_timesteps(x.shape[0])
         x_t, noise = self.diffusion.noise_data(x, t)

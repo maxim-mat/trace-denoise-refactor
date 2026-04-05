@@ -1,6 +1,3 @@
-# Training configuration for 50 Salads dataset with base unet denoiser
-# Usage: python main.py --config configs/train.yaml
-
 seed: 42
 
 data:
@@ -12,13 +9,12 @@ data:
   batch_size: 5
   num_workers: 0
   pin_memory: false
-  # No target length, try dynamic padding
 
 model:
   type: unet
   loss_function: cross_entropy
   time_dim: 128
-  n_channels: 20
+  n_channels: 19
   conditional_dropout: 0.2
   
 diffusion:
@@ -41,12 +37,13 @@ trainer:
   val_check_interval: 0.2
   log_every_n_steps: 50
   deterministic: false
+  fast_dev_run: true
 
 optimizer:
   method: adamw
   learning_rate: 1e-5
   weight_decay: 0.0
-  scheduler: "consine"
+  scheduler: "cosine"
 
 callbacks:
   early_stopping: true
