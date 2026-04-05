@@ -40,6 +40,7 @@ def create_datamodule(cfg: Config, labels, data) -> TracesDataModule:
         padding_value=cfg.data.padding_value,
         pin_memory=cfg.data.pin_memory,
         target_length=cfg.data.target_length,
+        use_padding_mask=cfg.data.use_padding_mask,
         seed=cfg.seed,
         get_flow_matrix=get_flow_matrix,
         get_graph_data=get_graph_data,

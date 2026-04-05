@@ -22,11 +22,19 @@ class HybridLoss(nn.Module):
         predicted: Tuple[torch.Tensor, Optional[torch.Tensor]], 
         target: Tuple[torch.Tensor, Optional[torch.Tensor]],
         ignore_index: Optional[int] = None,
+        padding_mask: Optional[torch.Tensor] = None,
     ):
         predicted_primary, predicted_auxiliary = predicted
         target_primary, target_auxiliary = target
-        if predicted_auxiliary is not None:
-            return self.gamma * self.first_loss(predicted_primary, target_primary, ignore_index=ignore_index) + \
-                (1 - self.gamma) * self.second_loss(predicted_auxiliary, target_auxiliary)
+
+        if padding_mask is not None:
+            # mask-based reduction: compute per-element loss, mask, average
+            primary_loss = self.first_loss(predicted_primary, target_primary)
+            primary_loss = (primary_loss * padding_mask).sum() / padding_mask.sum().clamp(min=1)
         else:
-            return self.first_loss(predicted_primary, target_primary, ignore_index=ignore_index)
+            primary_loss = self.first_loss(predicted_primary, target_primary, ignore_index=ignore_index)
+
+        if predicted_auxiliary is not None:
+            return self.gamma * primary_loss + (1 - self.gamma) * self.second_loss(predicted_auxiliary, target_auxiliary)
+        else:
+            return primary_loss

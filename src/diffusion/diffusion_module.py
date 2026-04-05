@@ -63,8 +63,10 @@ class DiffusionLightningModule(L.LightningModule):
         self.verbose_test = config.logging.verbose_test
         self.trajectory_metrics = config.metrics.verbose_trajectory or ["accuracy"]
         self.trajectory_save_every = config.metrics.trajectory_save_every
+        self.use_padding_mask = config.data.use_padding_mask
         
-        self.loss_fn = self._create_loss_fn(self.loss_type)
+        reduction = "none" if self.use_padding_mask else "mean"
+        self.loss_fn = self._create_loss_fn(self.loss_type, reduction=reduction)
         self.ignore_index = config.data.padding_value
         self.log_samples_every_n = config.logging.log_samples_every_n
         
@@ -101,20 +103,34 @@ class DiffusionLightningModule(L.LightningModule):
         )
         return model
 
-    def _create_loss_fn(self, loss_type: str) -> nn.Module:
-        """Create a loss function from type string."""
+    def _create_loss_fn(self, loss_type: str, reduction: str = "mean") -> nn.Module:
+        """Create a loss function from type string.
+        
+        Args:
+            loss_type: Type of loss function.
+            reduction: 'mean' for legacy path, 'none' for mask-based path.
+        """
         if loss_type == "mse":
-            return nn.MSELoss()
+            return nn.MSELoss(reduction=reduction)
         elif loss_type == "l1":
-            return nn.L1Loss()
+            return nn.L1Loss(reduction=reduction)
         elif loss_type == "cross_entropy":
-            return nn.CrossEntropyLoss()
+            return nn.CrossEntropyLoss(reduction=reduction)
         elif loss_type == "hybrid":
-            return HybridLoss(nn.CrossEntropyLoss(), nn.BCEWithLogitsLoss(), self.gamma)
+            return HybridLoss(nn.CrossEntropyLoss(reduction=reduction), nn.BCEWithLogitsLoss(), self.gamma)
         elif loss_type == "learnable_hybrid":
-            return LearnableHybridLoss(nn.CrossEntropyLoss(), nn.BCEWithLogitsLoss(), self.gamma)
+            return LearnableHybridLoss(nn.CrossEntropyLoss(reduction=reduction), nn.BCEWithLogitsLoss(), self.gamma)
         else:
             raise ValueError(f"Unknown loss type: {loss_type}")
+    
+    def _masked_loss(self, raw_loss: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        """Apply padding mask to per-element loss and return mean over real positions.
+        
+        Args:
+            raw_loss: Per-element loss tensor (B, L) from a loss with reduction='none'.
+            mask: Boolean mask (B, L), True for real positions.
+        """
+        return (raw_loss * mask).sum() / mask.sum().clamp(min=1)
     
     def _setup_metrics(
         self,
@@ -207,6 +223,33 @@ class DiffusionLightningModule(L.LightningModule):
         """Forward pass through denoiser."""
         return self.denoiser(x, t, y)
 
+    def _unpack_batch(self, batch):
+        """Unpack batch into (data, labels, mask).
+        
+        Returns:
+            x: data tensor (B, L, C)
+            y: labels tensor
+            mask: padding mask (B, L) bool or None
+        """
+        if self.use_padding_mask:
+            x, y, mask = batch
+        else:
+            x, y = batch
+            mask = None
+        return x, y, mask
+
+    def _compute_loss(self, denoiser_out, target, mask=None):
+        """Compute loss with optional mask-based reduction."""
+        if self.use_padding_mask and mask is not None:
+            if self.loss_type in {"hybrid", "learnable_hybrid"}:
+                loss = self.loss_fn(denoiser_out, target, padding_mask=mask)
+            else:
+                raw_loss = self.loss_fn(denoiser_out, target)
+                loss = self._masked_loss(raw_loss, mask)
+        else:
+            loss = self.loss_fn(denoiser_out, target, ignore_index=self.ignore_index)
+        return loss
+
     def training_step(self, batch, batch_idx):
         """
         Training step with forward diffusion (Algorithm 1).
@@ -214,9 +257,9 @@ class DiffusionLightningModule(L.LightningModule):
         Computes single-step denoising loss. Supports multi-output denoisers
         by extracting primary output for loss computation.
         
-        Expected batch format: (labels, data) where data is (B, L, C).
+        Expected batch format: (labels, data) or (labels, data, mask). shapes are (B, L, C)
         """
-        x, y = batch
+        x, y, mask = self._unpack_batch(batch)
         x = x.permute(0, 2, 1).float()  # (B, C, L)
         
         t = self.diffusion.sample_timesteps(x.shape[0])
@@ -236,10 +279,7 @@ class DiffusionLightningModule(L.LightningModule):
             target = (target, self.denoiser.gt_flow_matrix)
         
         denoiser_out = self.denoiser(x_t, t, y, use_aux)
-        if self.loss_type in {"cross_entropy", "hybrid", "learnable_hybrid"}:
-            loss = self.loss_fn(denoiser_out, target, ignore_index=self.ignore_index)
-        else:
-            loss = self.loss_fn(denoiser_out, target)
+        loss = self._compute_loss(denoiser_out, target, mask)
         self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True)
         if self.loss_type == "hybrid":
             self.log("mixture_ratio", self.gamma, prog_bar=False)
@@ -274,7 +314,7 @@ class DiffusionLightningModule(L.LightningModule):
         - Every epoch: Compute single-step loss (cheap, for monitoring)
         - Every N epochs: Run full reverse diffusion and compute metrics (expensive)
         """
-        x, y = batch
+        x, y, mask = self._unpack_batch(batch)
         x = x.permute(0, 2, 1).float()  # (B, C, L)
         
         t = self.diffusion.sample_timesteps(x.shape[0])
@@ -289,10 +329,7 @@ class DiffusionLightningModule(L.LightningModule):
             target = (target, self.denoiser.gt_flow_matrix)
         
         denoiser_out = self.denoiser(x_t, t, y)
-        if self.loss_type in {"cross_entropy", "hybrid", "learnable_hybrid"}:
-            loss = self.loss_fn(denoiser_out, target, ignore_index=self.ignore_index)
-        else:
-            loss = self.loss_fn(denoiser_out, target)
+        loss = self._compute_loss(denoiser_out, target, mask)
         
         self.log("val/loss", loss, on_step=True, on_epoch=True, prog_bar=True)
         
@@ -305,7 +342,7 @@ class DiffusionLightningModule(L.LightningModule):
         When verbose_test is enabled, also evaluates metrics at each point
         along the reverse diffusion trajectory for analysis.
         """
-        x, y = batch
+        x, y, mask = self._unpack_batch(batch)
         x = x.permute(0, 2, 1).float()  # (B, C, L)
         
         x_pred = self.eval_diffusion.sample(self.denosier, y.shape[0], (y.shape[1], y.shape[2]), y, self.denoiser_output)
@@ -323,7 +360,7 @@ class DiffusionLightningModule(L.LightningModule):
         
         - Every n batches: Log a sample of the predictions and targets
         """
-        y = batch
+        x, y, mask = self._unpack_batch(batch)
         x_pred = self.eval_diffusion.sample(self.denosier, y.shape[0], (y.shape[1], y.shape[2]), y, self.denoiser_output)
 
         return torch.argmax(torch.softmax(x_pred, dim=1), dim=1)

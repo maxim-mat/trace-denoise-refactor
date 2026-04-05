@@ -21,12 +21,19 @@ class LearnableHybridLoss(nn.Module):
         predicted: Tuple[torch.Tensor, Optional[torch.Tensor]],
         target: Tuple[torch.Tensor, Optional[torch.Tensor]],
         ignore_index: Optional[int] = None,
+        padding_mask: Optional[torch.Tensor] = None,
     ):
         predicted_primary, predicted_auxiliary = predicted
         target_primary, target_auxiliary = target
+
+        if padding_mask is not None:
+            primary_loss = self.first_loss(predicted_primary, target_primary)
+            primary_loss = (primary_loss * padding_mask).sum() / padding_mask.sum().clamp(min=1)
+        else:
+            primary_loss = self.first_loss(predicted_primary, target_primary, ignore_index=ignore_index)
+
         if predicted_auxiliary is not None and target_auxiliary is not None:
             scale = torch.sigmoid(self.gamma)
-            return scale * self.first_loss(predicted_primary, target_primary, ignore_index=ignore_index) + \
-                 (1 - scale) * self.second_loss(predicted_auxiliary, target_auxiliary)
+            return scale * primary_loss + (1 - scale) * self.second_loss(predicted_auxiliary, target_auxiliary)
         else:
-            return self.first_loss(predicted_primary, target_primary, ignore_index=ignore_index)
+            return primary_loss

@@ -2,7 +2,7 @@ import torch
 import lightning as L
 from torch.utils.data import DataLoader, random_split
 from functools import partial
-from .dataset import TracesDataset, collate_traces_batch, collate_traces_batch_probabilistic
+from .dataset import TracesDataset, collate_traces_batch, collate_traces_batch_probabilistic, collate_traces_mask
 import logging
 from src.utils.pm_utils import discover_process, get_petri_net_flow_matrix
 from src.utils.graph_utils import prepare_process_model_for_gnn, prepare_process_model_for_heterognn
@@ -26,6 +26,7 @@ class TracesDataModule(L.LightningDataModule):
         one_hot_labels=False,
         target_length=None,
         probabilistic=False,
+        use_padding_mask=False,
         pin_memory=True,
         persistent_workers=False,
         seed=42,
@@ -49,6 +50,7 @@ class TracesDataModule(L.LightningDataModule):
         self.one_hot_labels = one_hot_labels
         self.target_length = target_length
         self.probabilistic = probabilistic
+        self.use_padding_mask = use_padding_mask
         self.pin_memory = pin_memory
         self.persistent_workers = persistent_workers
         self.seed = seed
@@ -102,6 +104,12 @@ class TracesDataModule(L.LightningDataModule):
         return graph_data
         
     def _get_collate_fn(self):
+        if self.use_padding_mask:
+            return partial(
+                collate_traces_mask,
+                one_hot_labels=self.one_hot_labels,
+            )
+
         collate_fn = (
             collate_traces_batch_probabilistic 
             if self.probabilistic 
