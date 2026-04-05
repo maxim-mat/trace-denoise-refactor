@@ -7,6 +7,7 @@ import pickle as pkl
 from src.utils.config import Config
 from pathlib import Path
 from omegaconf import OmegaConf
+from src.diffusion import DiffusionLightningModule
 
 
 def load_config(config_path: Path, overrides: list[str]) -> Config:
@@ -62,3 +63,13 @@ def parse_args():
         help="Config overrides in dotlist format (e.g., trainer.max_epochs=50)",
     )
     return parser.parse_args()
+
+
+def create_model(cfg: Config, denoiser, diffusion, eval_diffusion) -> DiffusionLightningModule:
+    """Create DiffusionLightningModule."""
+    return DiffusionLightningModule(
+        denoiser=denoiser,
+        diffusion=diffusion,
+        eval_diffusion=eval_diffusion,
+        config=cfg,
+    )

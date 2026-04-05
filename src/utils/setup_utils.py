@@ -3,10 +3,9 @@
 from src.utils.config import Config
 from src.dataset import TracesDataModule
 from src.denoisers import ConditionalUnetDenoiser, ConditionalUnetGraphDenoiser, ConditionalUnetMatrixDenoiser
-from src.diffusion import DiffusionLightningModule, DDPM, DDIM
+from src.diffusion import DDPM, DDIM
 from lightning.pytorch.loggers import Logger, MLFlowLogger, TensorBoardLogger, WandbLogger
 from typing import List, Optional
-from omegaconf import OmegaConf
 import pickle as pkl
 from pathlib import Path
 
@@ -99,16 +98,6 @@ def create_diffusion(sampler, cfg: Config) -> Optional[DDPM | DDIM]:
             beta_end=cfg.diffusion.beta_end,
         )
     return None
-
-
-def create_model(cfg: Config, denoiser, diffusion, eval_diffusion) -> DiffusionLightningModule:
-    """Create DiffusionLightningModule."""
-    return DiffusionLightningModule(
-        denoiser=denoiser,
-        diffusion=diffusion,
-        eval_diffusion=eval_diffusion,
-        config=cfg,
-    )
 
 
 def create_loggers(cfg: Config, save_dir: Path) -> List[Logger]:

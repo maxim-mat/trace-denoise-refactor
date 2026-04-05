@@ -20,7 +20,8 @@ from src.dataset import TracesDataModule
 from src.denoisers import ConditionalUnetDenoiser, ConditionalUnetGraphDenoiser, ConditionalUnetMatrixDenoiser
 from src.diffusion import DiffusionLightningModule, DDPM, DDIM
 from src.utils.config import Config
-from src.utils.setup_utils import load_data, create_datamodule, create_denoiser, create_diffusion, create_model, create_loggers
+from src.utils.setup_utils import load_data, create_datamodule, create_denoiser, create_diffusion, create_loggers
+from src.utils.initialization import create_model
 
 
 logger = logging.getLogger(__name__)
