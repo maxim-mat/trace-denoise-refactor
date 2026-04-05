@@ -37,7 +37,7 @@ def create_datamodule(cfg: Config, labels, data) -> TracesDataModule:
         num_workers=cfg.data.num_workers,
         val_split=cfg.data.val_split,
         test_split=cfg.data.test_split,
-        padding_value=cfg.data.num_classes,
+        padding_value=cfg.data.padding_value,
         pin_memory=cfg.data.pin_memory,
         target_length=cfg.data.target_length,
         seed=cfg.seed,

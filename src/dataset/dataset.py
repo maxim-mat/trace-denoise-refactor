@@ -115,6 +115,35 @@ def collate_traces_batch_probabilistic(
     return padded_labels, padded_data
 
 
+def collate_traces_mask(batch, one_hot_labels=False):
+    """Collate with a boolean padding mask instead of a sentinel padding value.
+
+    Returns:
+        padded_labels: (B, L) long or (B, L, C) float if one_hot_labels
+        padded_data:   (B, L, C) float
+        padding_mask:  (B, L) bool — True for real positions, False for padding
+    """
+    labels = [x[0] for x in batch]
+    data = [x[1] for x in batch]
+    num_classes = data[0].shape[-1]
+
+    # Record original lengths before padding
+    lengths = torch.tensor([x.shape[0] for x in labels])
+
+    # Pad sequences — fill value is irrelevant, the mask is the source of truth
+    padded_labels = pad_sequence(labels, batch_first=True, padding_value=0)
+    padded_data = pad_sequence(data, batch_first=True, padding_value=0.0)
+
+    # Boolean mask: True where content is real, False where padded
+    max_len = padded_labels.shape[1]
+    padding_mask = torch.arange(max_len).unsqueeze(0) < lengths.unsqueeze(1)
+
+    if one_hot_labels:
+        padded_labels = one_hot(padded_labels, num_classes=num_classes)
+
+    return padded_labels, padded_data, padding_mask
+
+
 class TracesDataset(Dataset):
     # expected format of data: (B, C, L) or (C, L)
     # expected format of labels: (L,) or (B, L)

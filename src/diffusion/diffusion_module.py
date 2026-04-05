@@ -65,7 +65,7 @@ class DiffusionLightningModule(L.LightningModule):
         self.trajectory_save_every = config.metrics.trajectory_save_every
         
         self.loss_fn = self._create_loss_fn(self.loss_type)
-        self.ignore_index = config.data.num_classes
+        self.ignore_index = config.data.padding_value
         self.log_samples_every_n = config.logging.log_samples_every_n
         
         self._setup_metrics(
