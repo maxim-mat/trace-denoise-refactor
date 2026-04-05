@@ -66,7 +66,8 @@ class DiffusionLightningModule(L.LightningModule):
         self.use_padding_mask = config.data.use_padding_mask
         
         reduction = "none" if self.use_padding_mask else "mean"
-        self.loss_fn = self._create_loss_fn(self.loss_type, reduction=reduction)
+        ignore_index = config.data.padding_value if not self.use_padding_mask else None
+        self.loss_fn = self._create_loss_fn(self.loss_type, reduction=reduction, ignore_index=ignore_index)
         self.ignore_index = config.data.padding_value
         self.log_samples_every_n = config.logging.log_samples_every_n
         
@@ -103,23 +104,28 @@ class DiffusionLightningModule(L.LightningModule):
         )
         return model
 
-    def _create_loss_fn(self, loss_type: str, reduction: str = "mean") -> nn.Module:
+    def _create_loss_fn(self, loss_type: str, reduction: str = "mean", ignore_index: int = None) -> nn.Module:
         """Create a loss function from type string.
         
         Args:
             loss_type: Type of loss function.
             reduction: 'mean' for legacy path, 'none' for mask-based path.
+            ignore_index: If set, passed to CrossEntropyLoss at construction time.
         """
+        ce_kwargs = {"reduction": reduction}
+        if ignore_index is not None:
+            ce_kwargs["ignore_index"] = ignore_index
+
         if loss_type == "mse":
             return nn.MSELoss(reduction=reduction)
         elif loss_type == "l1":
             return nn.L1Loss(reduction=reduction)
         elif loss_type == "cross_entropy":
-            return nn.CrossEntropyLoss(reduction=reduction)
+            return nn.CrossEntropyLoss(**ce_kwargs)
         elif loss_type == "hybrid":
-            return HybridLoss(nn.CrossEntropyLoss(reduction=reduction), nn.BCEWithLogitsLoss(), self.gamma)
+            return HybridLoss(nn.CrossEntropyLoss(**ce_kwargs), nn.BCEWithLogitsLoss(), self.gamma)
         elif loss_type == "learnable_hybrid":
-            return LearnableHybridLoss(nn.CrossEntropyLoss(reduction=reduction), nn.BCEWithLogitsLoss(), self.gamma)
+            return LearnableHybridLoss(nn.CrossEntropyLoss(**ce_kwargs), nn.BCEWithLogitsLoss(), self.gamma)
         else:
             raise ValueError(f"Unknown loss type: {loss_type}")
     
@@ -239,7 +245,11 @@ class DiffusionLightningModule(L.LightningModule):
         return x, y, mask
 
     def _compute_loss(self, denoiser_out, target, mask=None):
-        """Compute loss with optional mask-based reduction."""
+        """Compute loss with optional mask-based reduction.
+        
+        In the mask path (reduction='none'), applies the mask to per-element loss.
+        In the legacy path (reduction='mean'), ignore_index is already baked into the loss.
+        """
         if self.use_padding_mask and mask is not None:
             if self.loss_type in {"hybrid", "learnable_hybrid"}:
                 loss = self.loss_fn(denoiser_out, target, padding_mask=mask)
@@ -247,7 +257,7 @@ class DiffusionLightningModule(L.LightningModule):
                 raw_loss = self.loss_fn(denoiser_out, target)
                 loss = self._masked_loss(raw_loss, mask)
         else:
-            loss = self.loss_fn(denoiser_out, target, ignore_index=self.ignore_index)
+            loss = self.loss_fn(denoiser_out, target)
         return loss
 
     def training_step(self, batch, batch_idx):
