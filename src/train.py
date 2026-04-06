@@ -38,18 +38,18 @@ def _create_callbacks(cfg: Config, save_dir: Path, start_time: str) -> list:
             dirpath=checkpoint_dir,
             filename=f"{start_time}-{cfg.logging.experiment_name}-{cfg.logging.run_name}-{cfg.logging.version}-{{epoch:03d}}-{{val_loss:.4f}}",
             mode="min",
-            monitor="val_loss",
+            monitor="val/loss",
             save_top_k=cfg.callbacks.save_top_k,
             save_last=cfg.callbacks.save_last,
             verbose=True,
         )
     )
 
-    callbacks.append(BatchSizeFinder(
-            mode="binsearch",
-            margin=0.1,
-        )
-    )
+    # callbacks.append(BatchSizeFinder(
+    #         mode="binsearch",
+    #         margin=0.1,
+    #     )
+    # )
 
     callbacks.append(LearningRateFinder(
             min_lr=1e-6,
@@ -145,8 +145,12 @@ def train(cfg: Config):
         ckpt_path=cfg.resume_from,
     )
     
-    # Test
-    logger.info("Running test evaluation...")
-    trainer.test(model, datamodule=datamodule, ckpt_path="best")
+    best_model_path = trainer.checkpoint_callback.best_model_path
+    if best_model_path:
+        logger.info(f"Running test evaluation using best checkpoint: {best_model_path}")
+        trainer.test(model, datamodule=datamodule, ckpt_path=best_model_path)
+    else:
+        logger.warning("No best checkpoint found! Running test evaluation with current model weights.")
+        trainer.test(model, datamodule=datamodule)
     
     logger.info("Training complete. Best checkpoint: %s", trainer.checkpoint_callback.best_model_path)

@@ -1,4 +1,5 @@
 seed: 42
+checkpoint_path: "outputs/initial_test/initial_run/checkpoints/last.ckpt"
 
 data:
   path: data/processed/50_salads_unified.pkl
@@ -9,26 +10,6 @@ data:
   batch_size: 5
   num_workers: 0
   pin_memory: false
-  class_names:
-    0: cut_tomato
-    1: place_tomato_into_bowl
-    2: cut_cheese
-    3: place_cheese_into_bowl
-    4: cut_lettuce
-    5: place_lettuce_into_bowl
-    6: add_salt
-    7: add_vinegar
-    8: add_oil
-    9: add_pepper
-    10: mix_dressing
-    11: peel_cucumber
-    12: cut_cucumber
-    13: place_cucumber_into_bowl
-    14: add_dressing
-    15: mix_ingredients
-    16: serve_salad_onto_plate
-    17: action_start
-    18: action_end
 
 model:
   type: unet
@@ -48,7 +29,7 @@ diffusion:
   ddim_eta: 0.0
 
 trainer:
-  max_epochs: 2
+  max_epochs: 5000
   accelerator: auto
   devices: 1
   precision: 32
@@ -57,7 +38,7 @@ trainer:
   val_check_interval: 0.2
   log_every_n_steps: 50
   deterministic: false
-  fast_dev_run: false
+  fast_dev_run: true
 
 optimizer:
   method: adamw
@@ -68,7 +49,7 @@ optimizer:
 callbacks:
   early_stopping: true
   early_stopping_patience: 10
-  early_stopping_monitor: val/loss
+  early_stopping_monitor: val_loss
   early_stopping_mode: min
   save_top_k: 3
   save_last: true

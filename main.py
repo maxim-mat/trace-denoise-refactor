@@ -45,8 +45,10 @@ def main():
     
     if args.train:
         train(cfg)
-    else:
+    elif args.inference:
         run_inference(cfg)
+    else:
+        raise ValueError("Invalid mode. Use --train or --inference.")
 
 if __name__ == "__main__":
     main()

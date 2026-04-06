@@ -14,6 +14,7 @@ from src.modules.learnable_hybrid_loss import LearnableHybridLoss
 from src.modules.hybrid_loss import HybridLoss
 from src.utils.metrics import create_metric_collection
 from src.utils.setup_utils import create_denoiser, create_diffusion
+from src.utils.trace_utils import visualize_traces_segmentation
 
 
 class DiffusionLightningModule(L.LightningModule):
@@ -60,6 +61,7 @@ class DiffusionLightningModule(L.LightningModule):
         self.gamma = config.model.gamma
         self.loss_type = config.model.loss_function
         self.num_classes = config.data.num_classes
+        self.class_names = config.data.class_names
         self.verbose_test = config.logging.verbose_test
         self.trajectory_metrics = config.metrics.verbose_trajectory or ["accuracy"]
         self.trajectory_save_every = config.metrics.trajectory_save_every
@@ -286,6 +288,9 @@ class DiffusionLightningModule(L.LightningModule):
         else:
             target = x
 
+        if self.loss_type in {"cross_entropy", "hybrid", "learnable_hybrid"}:
+            target = torch.argmax(target, dim=1)
+
         if self.loss_type in {"hybrid", "learnable_hybrid"}:
             target = (target, self.denoiser.gt_flow_matrix)
         
@@ -327,6 +332,7 @@ class DiffusionLightningModule(L.LightningModule):
         """
         x, y, mask = self._unpack_batch(batch)
         x = x.permute(0, 2, 1).float()  # (B, C, L)
+        y = y.permute(0, 2, 1).float()
         
         t = self.diffusion.sample_timesteps(x.shape[0])
         x_t, noise = self.diffusion.noise_data(x, t)
@@ -335,6 +341,9 @@ class DiffusionLightningModule(L.LightningModule):
             target = noise
         else:
             target = x
+
+        if self.loss_type in {"cross_entropy", "hybrid", "learnable_hybrid"}:
+            target = torch.argmax(target, dim=1)
 
         if self.loss_type in {"hybrid", "learnable_hybrid"}:
             target = (target, self.denoiser.gt_flow_matrix)
@@ -355,9 +364,10 @@ class DiffusionLightningModule(L.LightningModule):
         """
         x, y, mask = self._unpack_batch(batch)
         x = x.permute(0, 2, 1).float()  # (B, C, L)
+        y = y.permute(0, 2, 1).float()
         
-        x_pred = self.eval_diffusion.sample(self.denosier, y.shape[0], (y.shape[1], y.shape[2]), y, self.denoiser_output)
-        self.test_metrics.update(x_pred, x)
+        x_pred = self.eval_diffusion.sample(self.denoiser, y.shape[0], (y.shape[1], y.shape[2]), y, self.denoiser_output)
+        self.test_metrics.update(x_pred, torch.argmax(x, dim=1))
 
         return {
             "preds": x_pred.detach(), 
@@ -377,16 +387,12 @@ class DiffusionLightningModule(L.LightningModule):
         return torch.argmax(torch.softmax(x_pred, dim=1), dim=1)
         
     def on_test_batch_end(self, outputs, batch, batch_idx, dataloader_idx=0):
-        # Only log a sample of batches to avoid slowing down testing
-        if batch_idx % self.log_samples_every_n != 0:
-            return
-
         preds = outputs["preds"]    # (B, C, L) logits/probs
         targets = outputs["targets"] # (B, C, L) or indices
         
         # Get hard indices for the gallery
-        pred_indices = torch.argmax(preds, dim=1).cpu().numpy()
-        target_indices = torch.argmax(targets, dim=1).cpu().numpy()
+        pred_indices = preds.cpu().numpy()
+        target_indices = targets.cpu().numpy()
 
         # Access the loggers
         if self.logger:
@@ -394,16 +400,16 @@ class DiffusionLightningModule(L.LightningModule):
                 if isinstance(logger, L.pytorch.loggers.WandbLogger):
                     self._log_wandb_gallery(logger, pred_indices, target_indices, batch_idx)
                 elif isinstance(logger, L.pytorch.loggers.TensorBoardLogger):
-                    self._log_tensorboard_vis(logger, pred_indices, batch_idx)
+                    self._log_tensorboard_vis(logger, pred_indices, target_indices, batch_idx)
 
     def _log_wandb_gallery(self, logger, pred_indices, target_indices, batch_idx):
         import wandb
         columns = ["id", "ground_truth", "prediction", "segmentation_vis"]
         table = wandb.Table(columns=columns)
 
-        for i in range(min(len(pred_indices), 5)): # Log 5 samples per batch
+        for i in range(min(len(pred_indices), 3)): # Log 3 samples per batch
             # Assuming you have a visualize_segmentation function
-            vis_img = self.visualize_segmentation(pred_indices[i]) 
+            vis_img = visualize_traces_segmentation([pred_indices[i], target_indices[i]], labels=["Predicted", "Ground Truth"])[0]
             
             table.add_data(
                 f"b{batch_idx}_s{i}",
@@ -411,14 +417,15 @@ class DiffusionLightningModule(L.LightningModule):
                 target_indices[i].tolist(),
                 wandb.Image(vis_img)
             )
+            plt.close(vis_img)  # Avoid memory leak
         logger.experiment.log({"test/output_gallery": table})
 
-    def _log_tensorboard_vis(self, logger, pred_indices, batch_idx):
+    def _log_tensorboard_vis(self, logger, pred_indices, target_indices, batch_idx):
         # Log the first image as a simple qualitative check
-        vis_img = self.visualize_segmentation(pred_indices[0])
-        # Convert HWC to CHW for TensorBoard
-        vis_tensor = torch.from_numpy(vis_img).permute(2, 0, 1)
-        logger.experiment.add_image(f"test_vis/{batch_idx}", vis_tensor, self.global_step)
+        vis_img = visualize_traces_segmentation([pred_indices[0], target_indices[0]], labels=["Predicted", "Ground Truth"])[0]
+        # TensorBoard can add matplotlib figures directly
+        logger.experiment.add_figure(f"test_vis/{batch_idx}", vis_img, self.global_step)
+        plt.close(vis_img)  # Avoid memory leak
 
     def _create_heatmap_figure(self, cm: np.ndarray):
         """
@@ -451,32 +458,30 @@ class DiffusionLightningModule(L.LightningModule):
         # Convert tensor to numpy for easier visualization
         cm = conf_matrix.cpu().numpy()
         
+        # Use matplotlib to create a figure (works for both W&B and TensorBoard)
+        fig = self._create_heatmap_figure(cm)
+        
         if self.logger:
             for logger in self.loggers:
-                # W&B has a dedicated plot for this
+                # Log as an image to W&B
                 if isinstance(logger, L.pytorch.loggers.WandbLogger):
                     import wandb
                     logger.experiment.log({
-                        "test/conf_matrix": wandb.plot.confusion_matrix(
-                            probs=None,
-                            y_true=None, # You can pass labels if you have them
-                            preds=None,
-                            cm_template=cm,
-                            class_names=self.activity_names # Provided in your MSc data
-                        )
+                        "test/conf_matrix": wandb.Image(fig)
                     })
                 
                 # TensorBoard requires an image (standard heatmap)
                 elif isinstance(logger, L.pytorch.loggers.TensorBoardLogger):
-                    fig = self._create_heatmap_figure(cm) # Use matplotlib to create a figure
                     logger.experiment.add_figure("test/conf_matrix", fig, self.global_step)
-                    plt.close(fig)
+                    
+        # Close figure after all loggers have processed it to prevent memory leak
+        plt.close(fig)
     
     def on_test_epoch_end(self):
         """Log test metrics at epoch end."""
         if self.test_metrics is not None:
             metrics = self.test_metrics.compute()
-            conf_matrix = metrics.pop("confusion_matrix")
+            conf_matrix = metrics.pop("test/confusion_matrix")
             self._log_confusion_matrix(conf_matrix)
             self.log_dict(metrics, prog_bar=True, sync_dist=True)
             self.test_metrics.reset()

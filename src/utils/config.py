@@ -18,6 +18,7 @@ class DataConfig:
     pin_memory: bool = False  # recommnded False for local, True for server
     # if set , all traces will be padded to this length
     target_length: Optional[int] = None
+    class_names: Optional[dict[int, str]] = None
 
 
 @dataclass

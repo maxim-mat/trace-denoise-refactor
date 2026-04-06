@@ -210,3 +210,6 @@ data/*/
 !data/raw/.gitkeep
 !data/processed/.gitkeep
 **/*.zip
+
+outputs/
+wandb/
