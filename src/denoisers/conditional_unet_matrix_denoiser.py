@@ -281,7 +281,7 @@ class ConditionalUnetMatrixDenoiser(nn.Module):
 
         x = self.up1(x4 + y4, x3_ca, t)
         x = self.sa4(x)
-        y = self.up1(x4 + y4, y3_ca, t)
+        y = self.up1_cond(x4 + y4, y3_ca, t)
         y = self.sa4_cond(y)
         m = self.up1_mat(m4, m3_ca, t)
         m = m.view(batch_dim, m.shape[1], -1)
@@ -306,8 +306,8 @@ class ConditionalUnetMatrixDenoiser(nn.Module):
 
         x = self.up3(x_next_ca + y_next_ca, x1, t)
         x = self.sa6(x)
-        y = self.up3(x_next_ca + y_next_ca, y1, t)
-        y = self.sa6(y)
+        y = self.up3_cond(x_next_ca + y_next_ca, y1, t)
+        y = self.sa6_cond(y)
         m = self.up3_mat(m_next_ca, m1.repeat(x.shape[0], 1, 1, 1), t)
 
         m = self.outc_mat(m)
@@ -368,17 +368,17 @@ class ConditionalUnetMatrixDenoiser(nn.Module):
         y4 = self.bot2_cond(y4)
         y4 = self.bot3_cond(y4)
 
-        y = self.up1(x4 + y4, y3, t)
+        y = self.up1_cond(x4 + y4, y3, t)
         x = self.up1(x4 + y4, x3, t)
         x = self.sa4(x)
-        y = self.sa4(y)
+        y = self.sa4_cond(y)
         x_next = self.up2(x + y, x2, t)
-        y_next = self.up2(x + y, y2, t)
-        y_next = self.sa5(y_next)
+        y_next = self.up2_cond(x + y, y2, t)
+        y_next = self.sa5_cond(y_next)
         x_next = self.sa5(x_next)
         x = self.up3(x_next + y_next, x1, t)
-        y = self.up3(x_next + y_next, y1, t)
-        y = self.sa6(y)
+        y = self.up3_cond(x_next + y_next, y1, t)
+        y = self.sa6_cond(y)
         x = self.sa6(x)
         x = self.outc(x + y)
 
