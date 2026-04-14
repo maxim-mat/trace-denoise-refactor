@@ -366,8 +366,9 @@ class DiffusionLightningModule(L.LightningModule):
     def on_validation_epoch_end(self):
         if len(self.val_metrics) > 0:
             metrics = self.val_metrics.compute()
-            conf_matrix = metrics.pop("val/confusion_matrix")
-            self._log_confusion_matrix(conf_matrix)
+            if "val/confusion_matrix" in metrics:
+                conf_matrix = metrics.pop("val/confusion_matrix")
+                self._log_confusion_matrix(conf_matrix)
             self.log_dict(metrics, prog_bar=True, sync_dist=True)
             self.test_metrics.reset()
 
@@ -512,8 +513,9 @@ class DiffusionLightningModule(L.LightningModule):
         """Log test metrics at epoch end."""
         if len(self.test_metrics) > 0:
             metrics = self.test_metrics.compute()
-            conf_matrix = metrics.pop("test/confusion_matrix")
-            self._log_confusion_matrix(conf_matrix)
+            if "test/confusion_matrix" in metrics:
+                conf_matrix = metrics.pop("test/confusion_matrix")
+                self._log_confusion_matrix(conf_matrix)
             self.log_dict(metrics, prog_bar=True, sync_dist=True)
             self.test_metrics.reset()
         
