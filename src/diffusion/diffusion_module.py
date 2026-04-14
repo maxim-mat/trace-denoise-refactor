@@ -350,6 +350,10 @@ class DiffusionLightningModule(L.LightningModule):
         
         denoiser_out = self.denoiser(x_t, t, y)
         loss = self._compute_loss(denoiser_out, target, mask)
+
+        if self.trainer.sanity_checking:
+            return {"loss": loss}
+
         if len(self.val_metrics) > 0:
             x_pred = self.eval_diffusion.sample(self.denoiser, y.shape[0], (y.shape[1], y.shape[2]), y, self.denoiser_output)
             self.val_metrics.update(x_pred, torch.argmax(x, dim=1))
