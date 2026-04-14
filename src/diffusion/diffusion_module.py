@@ -350,10 +350,41 @@ class DiffusionLightningModule(L.LightningModule):
         
         denoiser_out = self.denoiser(x_t, t, y)
         loss = self._compute_loss(denoiser_out, target, mask)
+        if len(self.val_metrics) > 0:
+            x_pred = self.eval_diffusion.sample(self.denoiser, y.shape[0], (y.shape[1], y.shape[2]), y, self.denoiser_output)
+            self.val_metrics.update(x_pred, torch.argmax(x, dim=1))
         
         self.log("val/loss", loss, on_step=True, on_epoch=True, prog_bar=True)
         
-        return loss
+        return {
+            "loss": loss,
+            "preds": x_pred.detach(),
+            "targets": x.detach(),
+            "batch_idx": batch_idx
+        }
+
+    def on_validation_epoch_end(self):
+        if len(self.val_metrics) > 0:
+            metrics = self.val_metrics.compute()
+            conf_matrix = metrics.pop("val/confusion_matrix")
+            self._log_confusion_matrix(conf_matrix)
+            self.log_dict(metrics, prog_bar=True, sync_dist=True)
+            self.test_metrics.reset()
+
+    def on_validation_batch_end(self, outputs, batch, batch_idx):
+        preds = outputs["preds"]    # (B, C, L) logits/probs
+        targets = outputs["targets"] # (B, C, L) or indices
+        
+        # Get hard indices for the gallery
+        pred_indices = preds.cpu().numpy()
+        target_indices = targets.cpu().numpy()
+
+        if self.logger:
+            for logger in self.loggers:
+                if isinstance(logger, L.pytorch.loggers.WandbLogger):
+                    self._log_wandb_gallery(logger, pred_indices, target_indices, batch_idx, mode="val")
+                elif isinstance(logger, L.pytorch.loggers.TensorBoardLogger):
+                    self._log_tensorboard_vis(logger, pred_indices, target_indices, batch_idx, mode="val")
     
     def test_step(self, batch, batch_idx):
         """
@@ -398,11 +429,11 @@ class DiffusionLightningModule(L.LightningModule):
         if self.logger:
             for logger in self.loggers:
                 if isinstance(logger, L.pytorch.loggers.WandbLogger):
-                    self._log_wandb_gallery(logger, pred_indices, target_indices, batch_idx)
+                    self._log_wandb_gallery(logger, pred_indices, target_indices, batch_idx, mode="test")
                 elif isinstance(logger, L.pytorch.loggers.TensorBoardLogger):
-                    self._log_tensorboard_vis(logger, pred_indices, target_indices, batch_idx)
+                    self._log_tensorboard_vis(logger, pred_indices, target_indices, batch_idx, mode="test")
 
-    def _log_wandb_gallery(self, logger, pred_indices, target_indices, batch_idx):
+    def _log_wandb_gallery(self, logger, pred_indices, target_indices, batch_idx, mode):
         import wandb
         columns = ["id", "ground_truth", "prediction", "segmentation_vis"]
         table = wandb.Table(columns=columns)
@@ -418,13 +449,13 @@ class DiffusionLightningModule(L.LightningModule):
                 wandb.Image(vis_img)
             )
             plt.close(vis_img)  # Avoid memory leak
-        logger.experiment.log({"test/output_gallery": table})
+        logger.experiment.log({f"{mode}/output_gallery": table})
 
-    def _log_tensorboard_vis(self, logger, pred_indices, target_indices, batch_idx):
+    def _log_tensorboard_vis(self, logger, pred_indices, target_indices, batch_idx, mode):
         # Log the first image as a simple qualitative check
         vis_img = visualize_traces_segmentation([pred_indices[0], target_indices[0]], labels=["Predicted", "Ground Truth"])[0]
         # TensorBoard can add matplotlib figures directly
-        logger.experiment.add_figure(f"test_vis/{batch_idx}", vis_img, self.global_step)
+        logger.experiment.add_figure(f"{mode}_vis/{batch_idx}", vis_img, self.global_step)
         plt.close(vis_img)  # Avoid memory leak
 
     def _create_heatmap_figure(self, cm: np.ndarray):
@@ -479,7 +510,7 @@ class DiffusionLightningModule(L.LightningModule):
     
     def on_test_epoch_end(self):
         """Log test metrics at epoch end."""
-        if self.test_metrics is not None:
+        if len(self.test_metrics) > 0:
             metrics = self.test_metrics.compute()
             conf_matrix = metrics.pop("test/confusion_matrix")
             self._log_confusion_matrix(conf_matrix)
