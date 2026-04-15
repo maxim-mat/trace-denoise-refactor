@@ -350,22 +350,19 @@ class DiffusionLightningModule(L.LightningModule):
         
         denoiser_out = self.denoiser(x_t, t, y)
         loss = self._compute_loss(denoiser_out, target, mask)
+        return_dict = {"loss": loss, "targets": x.detach, "batch_idx": batch_idx}
 
         if self.trainer.sanity_checking:
-            return {"loss": loss}
+            return return_dict
 
         if len(self.val_metrics) > 0:
             x_pred = self.eval_diffusion.sample(self.denoiser, y.shape[0], (y.shape[1], y.shape[2]), y, self.denoiser_output)
             self.val_metrics.update(x_pred, torch.argmax(x, dim=1))
+            return_dict["preds"] = x_pred.detach()
         
         self.log("val/loss", loss, on_step=True, on_epoch=True, prog_bar=True)
         
-        return {
-            "loss": loss,
-            "preds": x_pred.detach(),
-            "targets": x.detach(),
-            "batch_idx": batch_idx
-        }
+        return return_dict
 
     def on_validation_epoch_end(self):
         if len(self.val_metrics) > 0:
@@ -377,19 +374,20 @@ class DiffusionLightningModule(L.LightningModule):
             self.test_metrics.reset()
 
     def on_validation_batch_end(self, outputs, batch, batch_idx):
-        preds = outputs["preds"]    # (B, C, L) logits/probs
-        targets = outputs["targets"] # (B, C, L) or indices
-        
-        # Get hard indices for the gallery
-        pred_indices = preds.cpu().numpy()
-        target_indices = targets.cpu().numpy()
+        if len(self.val_metrics) > 0:
+            preds = outputs["preds"]    # (B, C, L) logits/probs
+            targets = outputs["targets"] # (B, C, L) or indices
+            
+            # Get hard indices for the gallery
+            pred_indices = preds.cpu().numpy()
+            target_indices = targets.cpu().numpy()
 
-        if self.logger:
-            for logger in self.loggers:
-                if isinstance(logger, L.pytorch.loggers.WandbLogger):
-                    self._log_wandb_gallery(logger, pred_indices, target_indices, batch_idx, mode="val")
-                elif isinstance(logger, L.pytorch.loggers.TensorBoardLogger):
-                    self._log_tensorboard_vis(logger, pred_indices, target_indices, batch_idx, mode="val")
+            if self.logger:
+                for logger in self.loggers:
+                    if isinstance(logger, L.pytorch.loggers.WandbLogger):
+                        self._log_wandb_gallery(logger, pred_indices, target_indices, batch_idx, mode="val")
+                    elif isinstance(logger, L.pytorch.loggers.TensorBoardLogger):
+                        self._log_tensorboard_vis(logger, pred_indices, target_indices, batch_idx, mode="val")
     
     def test_step(self, batch, batch_idx):
         """
