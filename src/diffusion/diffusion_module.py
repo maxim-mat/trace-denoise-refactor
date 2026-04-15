@@ -365,7 +365,7 @@ class DiffusionLightningModule(L.LightningModule):
         return return_dict
 
     def on_validation_epoch_end(self):
-        if len(self.val_metrics) > 0:
+        if len(self.val_metrics) > 0 and not self.trainer.sanity_checking:
             metrics = self.val_metrics.compute()
             if "val/confusion_matrix" in metrics:
                 conf_matrix = metrics.pop("val/confusion_matrix")
@@ -374,7 +374,7 @@ class DiffusionLightningModule(L.LightningModule):
             self.test_metrics.reset()
 
     def on_validation_batch_end(self, outputs, batch, batch_idx):
-        if len(self.val_metrics) > 0:
+        if len(self.val_metrics) > 0 and not self.trainer.sanity_checking:
             preds = outputs["preds"]    # (B, C, L) logits/probs
             targets = outputs["targets"] # (B, C, L) or indices
             
