@@ -129,6 +129,8 @@ def create_loggers(cfg: Config, save_dir: Path) -> List[Logger]:
                 offline=cfg.logging.wandb_offline,
                 name=cfg.logging.run_name,
                 version=cfg.logging.version,
+                save_dir=str(save_dir),
+                group=cfg.logging.experiment_name,
             ))
         else:
             raise ValueError(f"Unknown logger: {name}")
