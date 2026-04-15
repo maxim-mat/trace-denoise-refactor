@@ -350,7 +350,7 @@ class DiffusionLightningModule(L.LightningModule):
         
         denoiser_out = self.denoiser(x_t, t, y)
         loss = self._compute_loss(denoiser_out, target, mask)
-        return_dict = {"loss": loss, "targets": x.detach, "batch_idx": batch_idx}
+        return_dict = {"loss": loss, "targets": x.detach(), "batch_idx": batch_idx}
 
         if self.trainer.sanity_checking:
             return return_dict
