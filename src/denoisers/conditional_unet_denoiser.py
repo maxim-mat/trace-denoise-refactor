@@ -3,19 +3,7 @@ import torch.nn as nn
 from src.modules import DoubleConv, Up, Down, SelfAttention
 
 
-def _downsample_mask(mask, factor=2):
-    """Downsample a boolean mask (B, L) by max-pooling.
-    
-    If any position in a pooling window is True (real), the output is True.
-    Uses float max-pool then converts back to bool.
-    """
-    if mask is None:
-        return None
-    # (B, L) -> (B, 1, L) for max_pool1d
-    m = mask.float().unsqueeze(1)
-    m = torch.nn.functional.max_pool1d(m, kernel_size=factor)
-    return m.squeeze(1).bool()  # (B, L//factor)
-
+from src.utils.nn_utils import _downsample_mask
 
 class ConditionalUnetDenoiser(nn.Module):
     """
@@ -164,7 +152,7 @@ class ConditionalUnetDenoiser(nn.Module):
 
         return x
 
-    def forward(self, x, t, y=None, *args, mask=None, **kwargs):
+    def forward(self, x, t, y=None, mask=None, *args, **kwargs):
         """
         Forward pass for denoising.
         

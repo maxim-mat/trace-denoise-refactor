@@ -7,7 +7,7 @@ from src.modules.down import Down
 from src.modules.up import Up
 from src.modules.graph_encoder import GraphEncoder
 from src.modules.cross_attention import CrossAttention
-
+from src.utils.nn_utils import _downsample_mask
 
 class ConditionalUnetGraphDenoiser(nn.Module):
     """
@@ -127,51 +127,61 @@ class ConditionalUnetGraphDenoiser(nn.Module):
         pos_enc = torch.cat([pos_enc_a, pos_enc_b], dim=-1)
         return pos_enc
 
-    def _forward_uncond(self, x, t):
+    def _forward_uncond(self, x, t, mask=None):
         """Unconditional forward without graph."""
         t = t.unsqueeze(-1).type(torch.float)
         t = self.pos_encoding(t, self.time_dim, x.device)
 
+        mask1 = mask
+        mask2 = _downsample_mask(mask1)
+        mask3 = _downsample_mask(mask2)
+        mask4 = _downsample_mask(mask3)
+
         x1 = self.inc(x)
         x2 = self.down1(x1, t)
-        x2 = self.sa1(x2)
+        x2 = self.sa1(x2, key_padding_mask=mask2)
         x3 = self.down2(x2, t)
-        x3 = self.sa2(x3)
+        x3 = self.sa2(x3, key_padding_mask=mask3)
         x4 = self.down3(x3, t)
-        x4 = self.sa3(x4)
+        x4 = self.sa3(x4, key_padding_mask=mask4)
 
         x4 = self.bot1(x4)
         x4 = self.bot2(x4)
         x4 = self.bot3(x4)
 
         x = self.up1(x4, x3, t)
-        x = self.sa4(x)
+        x = self.sa4(x, key_padding_mask=mask3)
         x = self.up2(x, x2, t)
-        x = self.sa5(x)
+        x = self.sa5(x, key_padding_mask=mask2)
         x = self.up3(x, x1, t)
-        x = self.sa6(x)
+        x = self.sa6(x, key_padding_mask=mask1)
         x = self.outc(x)
         return x
 
-    def _forward_cond(self, x, y, t):
+    def _forward_cond(self, x, y, t, mask=None):
         """Conditional forward without graph."""
         t = t.unsqueeze(-1).type(torch.float)
         t = self.pos_encoding(t, self.time_dim, x.device)
+
+        mask1 = mask
+        mask2 = _downsample_mask(mask1)
+        mask3 = _downsample_mask(mask2)
+        mask4 = _downsample_mask(mask3)
 
         y1 = self.inc_cond(y)
         x1 = self.inc(x)
         x2 = self.down1(x1 + y1, t)
         y2 = self.down1_cond(x1 + y1, t)
-        y2 = self.sa1_cond(y2)
-        x2 = self.sa1(x2)
+        y2 = self.sa1_cond(y2, key_padding_mask=mask2)
+        x2 = self.sa1(x2, key_padding_mask=mask2)
         x3 = self.down2(x2 + y2, t)
-        x3 = self.sa2(x3)
+        x3 = self.sa2(x3, key_padding_mask=mask3)
         y3 = self.down2_cond(x2 + y2, t)
-        y3 = self.sa2_cond(y3)
+        y3 = self.sa2_cond(y3, key_padding_mask=mask3)
         x4 = self.down3(x3 + y3, t)
-        x4 = self.sa3(x4)
+        x4 = self.sa3(x4, key_padding_mask=mask4)
         y4 = self.down3_cond(x3 + y3, t)
-        y4 = self.sa3_cond(y4)
+        y4 = self.sa3_cond(y4, key_padding_mask=mask4)
 
         x4 = self.bot1(x4)
         x4 = self.bot2(x4)
@@ -182,24 +192,29 @@ class ConditionalUnetGraphDenoiser(nn.Module):
 
         y = self.up1_cond(x4 + y4, y3, t)
         x = self.up1(x4 + y4, x3, t)
-        x = self.sa4(x)
-        y = self.sa4_cond(y)
+        x = self.sa4(x, key_padding_mask=mask3)
+        y = self.sa4_cond(y, key_padding_mask=mask3)
         x_next = self.up2(x + y, x2, t)
         y_next = self.up2_cond(x + y, y2, t)
-        y_next = self.sa5_cond(y_next)
-        x_next = self.sa5(x_next)
+        y_next = self.sa5_cond(y_next, key_padding_mask=mask2)
+        x_next = self.sa5(x_next, key_padding_mask=mask2)
         x = self.up3(x_next + y_next, x1, t)
         y = self.up3_cond(x_next + y_next, y1, t)
-        y = self.sa6_cond(y)
-        x = self.sa6(x)
+        y = self.sa6_cond(y, key_padding_mask=mask1)
+        x = self.sa6(x, key_padding_mask=mask1)
         x = self.outc(x + y)
 
         return x
 
-    def _forward_uncond_graph(self, x, t):
+    def _forward_uncond_graph(self, x, t, mask=None):
         """Unconditional forward with graph fusion."""
         t = t.unsqueeze(-1).type(torch.float)
         t = self.pos_encoding(t, self.time_dim, x.device)
+
+        mask1 = mask
+        mask2 = _downsample_mask(mask1)
+        mask3 = _downsample_mask(mask2)
+        mask4 = _downsample_mask(mask3)
 
         batch_size = x.size(0)
         g = self.graph_data
@@ -207,30 +222,30 @@ class ConditionalUnetGraphDenoiser(nn.Module):
         x1 = self.inc(x)
         if self.gnn_pooling is None:
             x2 = self.down1(x1, t)
-            x2 = self.sa1(x2)
+            x2 = self.sa1(x2, key_padding_mask=mask2)
             g2 = self.genc2(g).view(-1, g.num_nodes).unsqueeze(0).repeat(batch_size, 1, 1)
             x2 = self.ca1(x2, g2, g2)
 
             x3 = self.down2(x2, t)
-            x3 = self.sa2(x3)
+            x3 = self.sa2(x3, key_padding_mask=mask3)
             g3 = self.genc3(g).view(-1, g.num_nodes).unsqueeze(0).repeat(batch_size, 1, 1)
             x3 = self.ca2(x3, g3, g3)
 
             x4 = self.down3(x3, t)
-            x4 = self.sa3(x4)
+            x4 = self.sa3(x4, key_padding_mask=mask4)
             g4 = self.genc4(g).view(-1, g.num_nodes).unsqueeze(0).repeat(batch_size, 1, 1)
             x4 = self.ca3(x4, g4, g4)
         else:
             x2 = self.down1(x1, t)
-            x2 = self.sa1(x2)
+            x2 = self.sa1(x2, key_padding_mask=mask2)
 
             g2 = self.genc2(g).view(1, -1, 1).repeat(batch_size, 1, x2.size(2))
             x3 = self.down2(x2 + g2, t)
-            x3 = self.sa2(x3)
+            x3 = self.sa2(x3, key_padding_mask=mask3)
 
             g3 = self.genc3(g).view(1, -1, 1).repeat(batch_size, 1, x3.size(2))
             x4 = self.down3(x3 + g3, t)
-            x4 = self.sa3(x4)
+            x4 = self.sa3(x4, key_padding_mask=mask4)
 
         x4 = self.bot1(x4)
         x4 = self.bot2(x4)
@@ -238,37 +253,42 @@ class ConditionalUnetGraphDenoiser(nn.Module):
 
         if self.gnn_pooling is None:
             x = self.up1(x4, x3, t)
-            x = self.sa4(x)
+            x = self.sa4(x, key_padding_mask=mask3)
 
             g5 = self.genc5(g).view(-1, g.num_nodes).unsqueeze(0).repeat(batch_size, 1, 1)
             x = self.ca4(x, g5, g5)
             x = self.up2(x, x2, t)
-            x = self.sa5(x)
+            x = self.sa5(x, key_padding_mask=mask2)
 
             g6 = self.genc6(g).view(-1, g.num_nodes).unsqueeze(0).repeat(batch_size, 1, 1)
             x = self.ca5(x, g6, g6)
             x = self.up3(x, x1, t)
-            x = self.sa6(x)
+            x = self.sa6(x, key_padding_mask=mask1)
         else:
             g4 = self.genc4(g).view(1, -1, 1).repeat(batch_size, 1, x4.size(2))
             x = self.up1(x4 + g4, x3, t)
-            x = self.sa4(x)
+            x = self.sa4(x, key_padding_mask=mask3)
 
             g5 = self.genc5(g).view(1, -1, 1).repeat(batch_size, 1, x.size(2))
             x = self.up2(x + g5, x2, t)
-            x = self.sa5(x)
+            x = self.sa5(x, key_padding_mask=mask2)
 
             g6 = self.genc6(g).view(1, -1, 1).repeat(batch_size, 1, x.size(2))
             x = self.up3(x + g6, x1, t)
-            x = self.sa6(x)
+            x = self.sa6(x, key_padding_mask=mask1)
 
         x = self.outc(x)
         return x
 
-    def _forward_cond_graph(self, x, y, t):
+    def _forward_cond_graph(self, x, y, t, mask=None):
         """Conditional forward with graph fusion."""
         t = t.unsqueeze(-1).type(torch.float)
         t = self.pos_encoding(t, self.time_dim, x.device)
+
+        mask1 = mask
+        mask2 = _downsample_mask(mask1)
+        mask3 = _downsample_mask(mask2)
+        mask4 = _downsample_mask(mask3)
 
         batch_size = x.size(0)
         g = self.graph_data
@@ -277,50 +297,50 @@ class ConditionalUnetGraphDenoiser(nn.Module):
         y1 = self.inc_cond(y)
         if self.gnn_pooling is None:
             x2 = self.down1(x1 + y1, t)
-            x2 = self.sa1(x2)
+            x2 = self.sa1(x2, key_padding_mask=mask2)
             y2 = self.down1_cond(y1 + x1, t)
-            y2 = self.sa1_cond(y2)
+            y2 = self.sa1_cond(y2, key_padding_mask=mask2)
             g2 = self.genc2(g).view(-1, g.num_nodes).unsqueeze(0).repeat(batch_size, 1, 1)
             g2_cond = self.genc2_cond(g).view(-1, g.num_nodes).unsqueeze(0).repeat(batch_size, 1, 1)
             x2 = self.ca1(x2, g2, g2)
             y2 = self.ca1_cond(y2, g2_cond, g2_cond)
 
             x3 = self.down2(x2 + y2, t)
-            x3 = self.sa2(x3)
+            x3 = self.sa2(x3, key_padding_mask=mask3)
             y3 = self.down2_cond(y2 + x2, t)
-            y3 = self.sa2_cond(y3)
+            y3 = self.sa2_cond(y3, key_padding_mask=mask3)
             g3 = self.genc3(g).view(-1, g.num_nodes).unsqueeze(0).repeat(batch_size, 1, 1)
             g3_cond = self.genc3_cond(g).view(-1, g.num_nodes).unsqueeze(0).repeat(batch_size, 1, 1)
             x3 = self.ca2(x3, g3, g3)
             y3 = self.ca2_cond(y3, g3_cond, g3_cond)
 
             x4 = self.down3(x3 + y3, t)
-            x4 = self.sa3(x4)
+            x4 = self.sa3(x4, key_padding_mask=mask4)
             y4 = self.down3_cond(y3 + x3, t)
-            y4 = self.sa3_cond(y4)
+            y4 = self.sa3_cond(y4, key_padding_mask=mask4)
             g4 = self.genc4(g).view(-1, g.num_nodes).unsqueeze(0).repeat(batch_size, 1, 1)
             g4_cond = self.genc4_cond(g).view(-1, g.num_nodes).unsqueeze(0).repeat(batch_size, 1, 1)
             x4 = self.ca3(x4, g4, g4)
             y4 = self.ca3_cond(y4, g4_cond, g4_cond)
         else:
             x2 = self.down1(x1 + y1, t)
-            x2 = self.sa1(x2)
+            x2 = self.sa1(x2, key_padding_mask=mask2)
             y2 = self.down1_cond(y1 + x1, t)
-            y2 = self.sa1_cond(y2)
+            y2 = self.sa1_cond(y2, key_padding_mask=mask2)
             g2 = self.genc2(g).view(1, -1, 1).repeat(batch_size, 1, x2.size(2))
             g2_cond = self.genc2_cond(g).view(1, -1, 1).repeat(batch_size, 1, y2.size(2))
 
             x3 = self.down2(x2 + y2 + g2, t)
-            x3 = self.sa2(x3)
+            x3 = self.sa2(x3, key_padding_mask=mask3)
             y3 = self.down2_cond(y2 + x2 + g2_cond, t)
-            y3 = self.sa2_cond(y3)
+            y3 = self.sa2_cond(y3, key_padding_mask=mask3)
             g3 = self.genc3(g).view(1, -1, 1).repeat(batch_size, 1, x3.size(2))
             g3_cond = self.genc3_cond(g).view(1, -1, 1).repeat(batch_size, 1, y3.size(2))
 
             x4 = self.down3(x3 + y3 + g3, t)
-            x4 = self.sa3(x4)
+            x4 = self.sa3(x4, key_padding_mask=mask4)
             y4 = self.down3_cond(y3 + x3 + g3_cond, t)
-            y4 = self.sa3_cond(y4)
+            y4 = self.sa3_cond(y4, key_padding_mask=mask4)
 
         x4 = self.bot1(x4)
         x4 = self.bot2(x4)
@@ -331,18 +351,18 @@ class ConditionalUnetGraphDenoiser(nn.Module):
 
         if self.gnn_pooling is None:
             x = self.up1(x4 + y4, x3, t)
-            x = self.sa4(x)
+            x = self.sa4(x, key_padding_mask=mask3)
             y = self.up1_cond(y4 + x4, y3, t)
-            y = self.sa4_cond(y)
+            y = self.sa4_cond(y, key_padding_mask=mask3)
             g5 = self.genc5(g).view(-1, g.num_nodes).unsqueeze(0).repeat(batch_size, 1, 1)
             g5_cond = self.genc5_cond(g).view(-1, g.num_nodes).unsqueeze(0).repeat(batch_size, 1, 1)
             x = self.ca4(x, g5, g5)
             y = self.ca4_cond(y, g5_cond, g5_cond)
 
             x_next = self.up2(x + y, x2, t)
-            x_next = self.sa5(x_next)
+            x_next = self.sa5(x_next, key_padding_mask=mask2)
             y = self.up2_cond(y + x, y2, t)
-            y = self.sa5_cond(y)
+            y = self.sa5_cond(y, key_padding_mask=mask2)
             g6 = self.genc6(g).view(-1, g.num_nodes).unsqueeze(0).repeat(batch_size, 1, 1)
             g6_cond = self.genc6_cond(g).view(-1, g.num_nodes).unsqueeze(0).repeat(batch_size, 1, 1)
             x = self.ca5(x_next, g6, g6)
@@ -350,34 +370,34 @@ class ConditionalUnetGraphDenoiser(nn.Module):
 
             x_next = self.up3(x + y, x1, t)
             y = self.up3_cond(y + x, y1, t)
-            x = self.sa6(x_next)
-            y = self.sa6_cond(y)
+            x = self.sa6(x_next, key_padding_mask=mask1)
+            y = self.sa6_cond(y, key_padding_mask=mask1)
         else:
             g4 = self.genc4(g).view(1, -1, 1).repeat(batch_size, 1, x4.size(2))
             g4_cond = self.genc4_cond(g).view(1, -1, 1).repeat(batch_size, 1, y4.size(2))
             x = self.up1(x4 + y4 + g4, x3, t)
-            x = self.sa4(x)
+            x = self.sa4(x, key_padding_mask=mask3)
             y = self.up1_cond(y4 + x4 + g4_cond, y3, t)
-            y = self.sa4_cond(y)
+            y = self.sa4_cond(y, key_padding_mask=mask3)
 
             g5 = self.genc5(g).view(1, -1, 1).repeat(batch_size, 1, x.size(2))
             g5_cond = self.genc5_cond(g).view(1, -1, 1).repeat(batch_size, 1, y.size(2))
             x_next = self.up2(x + y + g5, x2, t)
-            x_next = self.sa5(x_next)
+            x_next = self.sa5(x_next, key_padding_mask=mask2)
             y = self.up2_cond(y + x + g5_cond, y2, t)
-            y = self.sa5_cond(y)
+            y = self.sa5_cond(y, key_padding_mask=mask2)
 
             g6 = self.genc6(g).view(1, -1, 1).repeat(batch_size, 1, x_next.size(2))
             g6_cond = self.genc6_cond(g).view(1, -1, 1).repeat(batch_size, 1, y.size(2))
             x = self.up3(x_next + y + g6, x1, t)
-            x = self.sa6(x)
+            x = self.sa6(x, key_padding_mask=mask1)
             y = self.up3_cond(y + x_next + g6_cond, y1, t)
-            y = self.sa6_cond(y)
+            y = self.sa6_cond(y, key_padding_mask=mask1)
 
         x = self.outc(x + y)
         return x
 
-    def forward(self, x, t, y=None, use_graph=True):
+    def forward(self, x, t, y=None, use_graph=True, mask=None, *args, **kwargs):
         """
         Forward pass for denoising.
         
@@ -386,17 +406,18 @@ class ConditionalUnetGraphDenoiser(nn.Module):
             t: Diffusion timestep (B,)
             y: Optional conditioning tensor (B, C, L)
             use_graph: Whether to use graph conditioning
+            mask: Optional padding mask (B, L)
             
         Returns:
             x_hat: Denoised output tensor (B, C, L)
         """
         if use_graph:
             if y is not None:
-                return self._forward_cond_graph(x, y, t)
+                return self._forward_cond_graph(x, y, t, mask=mask)
             else:
-                return self._forward_uncond_graph(x, t)
+                return self._forward_uncond_graph(x, t, mask=mask)
         else:
             if y is not None:
-                return self._forward_cond(x, y, t)
+                return self._forward_cond(x, y, t, mask=mask)
             else:
-                return self._forward_uncond(x, t)
+                return self._forward_uncond(x, t, mask=mask)

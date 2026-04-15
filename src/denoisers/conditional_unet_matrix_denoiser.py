@@ -9,6 +9,7 @@ from src.modules.down import Down
 from src.modules.down_2d import Down2d
 from src.modules.self_attention import SelfAttention
 from src.modules.cross_attention import CrossAttention
+from src.utils.nn_utils import _downsample_mask
 
 
 class ConditionalUnetMatrixDenoiser(nn.Module):
@@ -154,38 +155,43 @@ class ConditionalUnetMatrixDenoiser(nn.Module):
         pos_enc = torch.cat([pos_enc_a, pos_enc_b], dim=-1)
         return pos_enc
 
-    def _forward_uncond_mat(self, x, m, t):
+    def _forward_uncond_mat(self, x, m, t, mask=None):
         t = t.unsqueeze(-1).type(torch.float)
         t = self.pos_encoding(t, self.time_dim, x.device)
         batch_dim = x.shape[0]
+
+        mask1 = mask
+        mask2 = _downsample_mask(mask1)
+        mask3 = _downsample_mask(mask2)
+        mask4 = _downsample_mask(mask3)
 
         x1 = self.inc(x)
         m1 = self.inc_mat(m)
 
         x2 = self.down1(x1, t)
-        x2 = self.sa1(x2)
+        x2 = self.sa1(x2, key_padding_mask=mask2)
         m2 = self.down1_mat(m1, t)
         m2 = m2.view(batch_dim, m2.shape[1], -1)
         m2 = self.sa1_mat(m2)
-        m2_ca = self.cams1(m2, x2, x2).view(m2.size(0), m2.size(1),
+        m2_ca = self.cams1(m2, x2, x2, key_padding_mask=mask2).view(m2.size(0), m2.size(1),
                                             self.transition_dim // 8, self.transition_dim // 8)
         x2_ca = self.casm1(x2, m2, m2)
 
         x3 = self.down2(x2_ca, t)
-        x3 = self.sa2(x3)
+        x3 = self.sa2(x3, key_padding_mask=mask3)
         m3 = self.down2_mat(m2_ca, t)
         m3 = m3.view(batch_dim, m3.shape[1], -1)
         m3 = self.sa2_mat(m3)
-        m3_ca = self.cams2(m3, x3, x3).view(m3.size(0), m3.size(1),
+        m3_ca = self.cams2(m3, x3, x3, key_padding_mask=mask3).view(m3.size(0), m3.size(1),
                                             self.transition_dim // 16, self.transition_dim // 16)
         x3_ca = self.casm2(x3, m3, m3)
 
         x4 = self.down3(x3_ca, t)
-        x4 = self.sa3(x4)
+        x4 = self.sa3(x4, key_padding_mask=mask4)
         m4 = self.down3_mat(m3_ca, t)
         m4 = m4.view(batch_dim, m4.shape[1], -1)
         m4 = self.sa3_mat(m4)
-        m4_ca = self.cams3(m4, x4, x4).view(m4.size(0), m4.size(1),
+        m4_ca = self.cams3(m4, x4, x4, key_padding_mask=mask4).view(m4.size(0), m4.size(1),
                                             self.transition_dim // 32, self.transition_dim // 32)
         x4_ca = self.casm3(x4, m4, m4)
 
@@ -197,26 +203,26 @@ class ConditionalUnetMatrixDenoiser(nn.Module):
         m4 = self.bot3_mat(m4)
 
         x = self.up1(x4, x3_ca, t)
-        x = self.sa4(x)
+        x = self.sa4(x, key_padding_mask=mask3)
         m = self.up1_mat(m4, m3_ca, t)
         m = m.view(batch_dim, m.shape[1], -1)
         m = self.sa4_mat(m)
-        m_ca = self.cams4(m, x, x).view(m.size(0), m.size(1),
+        m_ca = self.cams4(m, x, x, key_padding_mask=mask3).view(m.size(0), m.size(1),
                                         self.transition_dim // 16, self.transition_dim // 16)
         x_ca = self.casm4(x, m, m)
 
         x_next = self.up2(x_ca, x2_ca, t)
-        x_next = self.sa5(x_next)
+        x_next = self.sa5(x_next, key_padding_mask=mask2)
         m_next = self.up2_mat(m_ca, m2_ca, t)
         m_next = m_next.view(batch_dim, m_next.shape[1], -1)
         m_next = self.sa5_mat(m_next)
-        m_next_ca = self.cams5(m_next, x_next, x_next).view(m_next.size(0), m_next.size(1),
+        m_next_ca = self.cams5(m_next, x_next, x_next, key_padding_mask=mask2).view(m_next.size(0), m_next.size(1),
                                                            self.transition_dim // 8,
                                                            self.transition_dim // 8)
         x_next_ca = self.casm5(x_next, m_next, m_next)
 
         x = self.up3(x_next_ca, x1, t)
-        x = self.sa6(x)
+        x = self.sa6(x, key_padding_mask=mask1)
         m = self.up3_mat(m_next_ca, m1.repeat(x.shape[0], 1, 1, 1), t)
 
         m = self.outc_mat(m)
@@ -224,47 +230,52 @@ class ConditionalUnetMatrixDenoiser(nn.Module):
 
         return x, m
 
-    def _forward_cond_mat(self, x, y, m, t):
+    def _forward_cond_mat(self, x, y, m, t, mask=None):
         t = t.unsqueeze(-1).type(torch.float)
         t = self.pos_encoding(t, self.time_dim, x.device)
         batch_dim = x.shape[0]
+
+        mask1 = mask
+        mask2 = _downsample_mask(mask1)
+        mask3 = _downsample_mask(mask2)
+        mask4 = _downsample_mask(mask3)
 
         y1 = self.inc_cond(y)
         x1 = self.inc(x)
         m1 = self.inc_mat(m)
 
         x2 = self.down1(x1 + y1, t)
-        x2 = self.sa1(x2)
+        x2 = self.sa1(x2, key_padding_mask=mask2)
         y2 = self.down1_cond(x1 + y1, t)
-        y2 = self.sa1_cond(y2)
+        y2 = self.sa1_cond(y2, key_padding_mask=mask2)
         m2 = self.down1_mat(m1, t)
         m2 = m2.view(batch_dim, m2.shape[1], -1)
         m2 = self.sa1_mat(m2)
-        m2_ca = self.cams1(m2, x2 + y2, x2 + y2).view(m2.size(0), m2.size(1),
+        m2_ca = self.cams1(m2, x2 + y2, x2 + y2, key_padding_mask=mask2).view(m2.size(0), m2.size(1),
                                                       self.transition_dim // 8, self.transition_dim // 8)
         x2_ca = self.casm1(x2 + y2, m2, m2)
         y2_ca = self.casm1_cond(x2 + y2, m2, m2)
 
         x3 = self.down2(x2_ca + y2_ca, t)
-        x3 = self.sa2(x3)
+        x3 = self.sa2(x3, key_padding_mask=mask3)
         y3 = self.down2_cond(x2_ca + y2_ca, t)
-        y3 = self.sa2_cond(y3)
+        y3 = self.sa2_cond(y3, key_padding_mask=mask3)
         m3 = self.down2_mat(m2_ca, t)
         m3 = m3.view(batch_dim, m3.shape[1], -1)
         m3 = self.sa2_mat(m3)
-        m3_ca = self.cams2(m3, x3 + y3, x3 + y3).view(m3.size(0), m3.size(1),
+        m3_ca = self.cams2(m3, x3 + y3, x3 + y3, key_padding_mask=mask3).view(m3.size(0), m3.size(1),
                                                       self.transition_dim // 16, self.transition_dim // 16)
         x3_ca = self.casm2(x3 + y3, m3, m3)
         y3_ca = self.casm2_cond(x3 + y3, m3, m3)
 
         x4 = self.down3(x3_ca + y3_ca, t)
-        x4 = self.sa3(x4)
+        x4 = self.sa3(x4, key_padding_mask=mask4)
         y4 = self.down3_cond(x3_ca + y3_ca, t)
-        y4 = self.sa3_cond(y4)
+        y4 = self.sa3_cond(y4, key_padding_mask=mask4)
         m4 = self.down3_mat(m3_ca, t)
         m4 = m4.view(batch_dim, m4.shape[1], -1)
         m4 = self.sa3_mat(m4)
-        m4_ca = self.cams3(m4, x4 + y4, x4 + y4).view(m4.size(0), m4.size(1),
+        m4_ca = self.cams3(m4, x4 + y4, x4 + y4, key_padding_mask=mask4).view(m4.size(0), m4.size(1),
                                                       self.transition_dim // 32, self.transition_dim // 32)
         x4_ca = self.casm3(x4 + y4, m4, m4)
         y4_ca = self.casm3_cond(x4 + y4, m4, m4)
@@ -280,34 +291,34 @@ class ConditionalUnetMatrixDenoiser(nn.Module):
         m4 = self.bot3_mat(m4)
 
         x = self.up1(x4 + y4, x3_ca, t)
-        x = self.sa4(x)
+        x = self.sa4(x, key_padding_mask=mask3)
         y = self.up1_cond(x4 + y4, y3_ca, t)
-        y = self.sa4_cond(y)
+        y = self.sa4_cond(y, key_padding_mask=mask3)
         m = self.up1_mat(m4, m3_ca, t)
         m = m.view(batch_dim, m.shape[1], -1)
         m = self.sa4_mat(m)
-        m_ca = self.cams4(m, x + y, x + y).view(m.size(0), m.size(1),
+        m_ca = self.cams4(m, x + y, x + y, key_padding_mask=mask3).view(m.size(0), m.size(1),
                                                 self.transition_dim // 16, self.transition_dim // 16)
         x_ca = self.casm4(x + y, m, m)
         y_ca = self.casm4_cond(x + y, m, m)
 
         x_next = self.up2(x_ca + y_ca, x2_ca, t)
-        x_next = self.sa5(x_next)
+        x_next = self.sa5(x_next, key_padding_mask=mask2)
         y_next = self.up2_cond(x_ca + y_ca, y2_ca, t)
-        y_next = self.sa5_cond(y_next)
+        y_next = self.sa5_cond(y_next, key_padding_mask=mask2)
         m_next = self.up2_mat(m_ca, m2_ca, t)
         m_next = m_next.view(batch_dim, m_next.shape[1], -1)
         m_next = self.sa5_mat(m_next)
-        m_next_ca = self.cams5(m_next, x_next + y_next, x_next + y_next).view(m_next.size(0), m_next.size(1),
+        m_next_ca = self.cams5(m_next, x_next + y_next, x_next + y_next, key_padding_mask=mask2).view(m_next.size(0), m_next.size(1),
                                                                               self.transition_dim // 8,
                                                                               self.transition_dim // 8)
         x_next_ca = self.casm5(x_next + y_next, m_next, m_next)
         y_next_ca = self.casm5_cond(x_next + y_next, m_next, m_next)
 
         x = self.up3(x_next_ca + y_next_ca, x1, t)
-        x = self.sa6(x)
+        x = self.sa6(x, key_padding_mask=mask1)
         y = self.up3_cond(x_next_ca + y_next_ca, y1, t)
-        y = self.sa6_cond(y)
+        y = self.sa6_cond(y, key_padding_mask=mask1)
         m = self.up3_mat(m_next_ca, m1.repeat(x.shape[0], 1, 1, 1), t)
 
         m = self.outc_mat(m)
@@ -315,51 +326,61 @@ class ConditionalUnetMatrixDenoiser(nn.Module):
 
         return x, m
 
-    def _forward_uncond(self, x, t):
+    def _forward_uncond(self, x, t, mask=None):
         """Unconditional forward without matrix."""
         t = t.unsqueeze(-1).type(torch.float)
         t = self.pos_encoding(t, self.time_dim, x.device)
 
+        mask1 = mask
+        mask2 = _downsample_mask(mask1)
+        mask3 = _downsample_mask(mask2)
+        mask4 = _downsample_mask(mask3)
+
         x1 = self.inc(x)
         x2 = self.down1(x1, t)
-        x2 = self.sa1(x2)
+        x2 = self.sa1(x2, key_padding_mask=mask2)
         x3 = self.down2(x2, t)
-        x3 = self.sa2(x3)
+        x3 = self.sa2(x3, key_padding_mask=mask3)
         x4 = self.down3(x3, t)
-        x4 = self.sa3(x4)
+        x4 = self.sa3(x4, key_padding_mask=mask4)
 
         x4 = self.bot1(x4)
         x4 = self.bot2(x4)
         x4 = self.bot3(x4)
 
         x = self.up1(x4, x3, t)
-        x = self.sa4(x)
+        x = self.sa4(x, key_padding_mask=mask3)
         x = self.up2(x, x2, t)
-        x = self.sa5(x)
+        x = self.sa5(x, key_padding_mask=mask2)
         x = self.up3(x, x1, t)
-        x = self.sa6(x)
+        x = self.sa6(x, key_padding_mask=mask1)
         x = self.outc(x)
         return x, None
 
-    def _forward_cond(self, x, y, t):
+    def _forward_cond(self, x, y, t, mask=None):
         """Conditional forward without matrix."""
         t = t.unsqueeze(-1).type(torch.float)
         t = self.pos_encoding(t, self.time_dim, x.device)
+
+        mask1 = mask
+        mask2 = _downsample_mask(mask1)
+        mask3 = _downsample_mask(mask2)
+        mask4 = _downsample_mask(mask3)
 
         y1 = self.inc_cond(y)
         x1 = self.inc(x)
         x2 = self.down1(x1 + y1, t)
         y2 = self.down1_cond(x1 + y1, t)
-        y2 = self.sa1_cond(y2)
-        x2 = self.sa1(x2)
+        y2 = self.sa1_cond(y2, key_padding_mask=mask2)
+        x2 = self.sa1(x2, key_padding_mask=mask2)
         x3 = self.down2(x2 + y2, t)
-        x3 = self.sa2(x3)
+        x3 = self.sa2(x3, key_padding_mask=mask3)
         y3 = self.down2_cond(x2 + y2, t)
-        y3 = self.sa2_cond(y3)
+        y3 = self.sa2_cond(y3, key_padding_mask=mask3)
         x4 = self.down3(x3 + y3, t)
-        x4 = self.sa3(x4)
+        x4 = self.sa3(x4, key_padding_mask=mask4)
         y4 = self.down3_cond(x3 + y3, t)
-        y4 = self.sa3_cond(y4)
+        y4 = self.sa3_cond(y4, key_padding_mask=mask4)
 
         x4 = self.bot1(x4)
         x4 = self.bot2(x4)
@@ -370,21 +391,21 @@ class ConditionalUnetMatrixDenoiser(nn.Module):
 
         y = self.up1_cond(x4 + y4, y3, t)
         x = self.up1(x4 + y4, x3, t)
-        x = self.sa4(x)
-        y = self.sa4_cond(y)
+        x = self.sa4(x, key_padding_mask=mask3)
+        y = self.sa4_cond(y, key_padding_mask=mask3)
         x_next = self.up2(x + y, x2, t)
         y_next = self.up2_cond(x + y, y2, t)
-        y_next = self.sa5_cond(y_next)
-        x_next = self.sa5(x_next)
+        y_next = self.sa5_cond(y_next, key_padding_mask=mask2)
+        x_next = self.sa5(x_next, key_padding_mask=mask2)
         x = self.up3(x_next + y_next, x1, t)
         y = self.up3_cond(x_next + y_next, y1, t)
-        y = self.sa6_cond(y)
-        x = self.sa6(x)
+        y = self.sa6_cond(y, key_padding_mask=mask1)
+        x = self.sa6(x, key_padding_mask=mask1)
         x = self.outc(x + y)
 
         return x, None
 
-    def forward(self, x, t, y=None, use_matrix=True):
+    def forward(self, x, t, y=None, use_matrix=True, mask=None, *args, **kwargs):
         """
         Forward pass for denoising.
         
@@ -393,6 +414,7 @@ class ConditionalUnetMatrixDenoiser(nn.Module):
             t: Diffusion timestep (B,)
             y: Optional conditioning tensor (B, C, L)
             use_matrix: Whether to use matrix branch (enables auxiliary output)
+            mask: Optional padding mask (B, L)
             
         Returns:
             If use_matrix=True: (x_hat, m_hat) - trace and matrix predictions
@@ -402,11 +424,11 @@ class ConditionalUnetMatrixDenoiser(nn.Module):
         """
         if use_matrix:
             if y is not None:
-                return self._forward_cond_mat(x, y, self.flow_matrix, t)
+                return self._forward_cond_mat(x, y, self.flow_matrix, t, mask=mask)
             else:
-                return self._forward_uncond_mat(x, self.flow_matrix, t)
+                return self._forward_uncond_mat(x, self.flow_matrix, t, mask=mask)
         else:
             if y is not None:
-                return self._forward_cond(x, y, t)
+                return self._forward_cond(x, y, t, mask=mask)
             else:
-                return self._forward_uncond(x, t)
+                return self._forward_uncond(x, t, mask=mask)

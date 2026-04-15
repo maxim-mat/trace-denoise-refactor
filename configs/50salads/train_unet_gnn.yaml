@@ -1,0 +1,95 @@
+seed: 42
+
+data:
+  path: data/processed/50_salads_unified.pkl
+  num_classes: 19
+  train_split: 0.7
+  val_split: 0.1
+  test_split: 0.2
+  batch_size: 5
+  num_workers: 0
+  pin_memory: false
+  class_names:
+    0: cut_tomato
+    1: place_tomato_into_bowl
+    2: cut_cheese
+    3: place_cheese_into_bowl
+    4: cut_lettuce
+    5: place_lettuce_into_bowl
+    6: add_salt
+    7: add_vinegar
+    8: add_oil
+    9: add_pepper
+    10: mix_dressing
+    11: peel_cucumber
+    12: cut_cucumber
+    13: place_cucumber_into_bowl
+    14: add_dressing
+    15: mix_ingredients
+    16: serve_salad_onto_plate
+    17: action_start
+    18: action_end
+
+model:
+  type: unet_graph
+  loss_function: cross_entropy
+  time_dim: 128
+  n_channels: 19
+  conditional_dropout: 0.2
+  
+diffusion:
+  noise_steps: 1000
+  beta_start: 1e-4
+  beta_end: 0.02
+  sampler: ddpm
+  denoiser_output: original
+  eval_use_ddim: true
+  ddim_inference_steps: 50
+  ddim_eta: 0.0
+
+trainer:
+  max_epochs: 2
+  accelerator: auto
+  devices: 1
+  precision: 32
+  gradient_clip_val: 1.0
+  accumulate_grad_batches: 1
+  val_check_interval: 0.2
+  log_every_n_steps: 50
+  deterministic: false
+  fast_dev_run: false
+
+optimizer:
+  method: adamw
+  learning_rate: 1e-5
+  weight_decay: 0.0
+  scheduler: "cosine"
+
+callbacks:
+  early_stopping: true
+  early_stopping_patience: 10
+  early_stopping_monitor: val/loss
+  early_stopping_mode: min
+  save_top_k: 3
+  save_last: true
+
+logging:
+  loggers:
+    - wandb
+  project_name: DDTR
+  experiment_name: initial_test
+  run_name: initial_run
+  version: 0.0.2
+  wandb_entity: maxim0
+  save_dir: ./outputs
+
+metrics:
+  test:
+    - accuracy
+    - precision
+    - recall
+    - f1
+    - wasserstein
+    - auroc
+    - confusion_matrix
+    
